@@ -1,91 +1,116 @@
-"""Tests for pipeline module — skeleton with fake adapters."""
+"""Tests for the bounded pipeline skeleton and track-state persistence."""
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-
-# ------------------------------------------------------------------ #
-# Test suite
-# ------------------------------------------------------------------ #
+from consented_face_redactor.pipeline import ProcessResult, RedactionPipeline, TrackState
 
 
-class TestPipelineInit:
-    def test_creates_without_side_effects(self, tmp_path: Path):
-        from consented_face_redactor.pipeline import RedactionPipeline
+def _pipeline() -> RedactionPipeline:
+    return RedactionPipeline(
+        {"effect_mode": "mosaic", "t_confirm": 0.65, "t_keep": 0.55}
+    )
 
-        before = set(str(p) for p in Path(".").rglob("*"))  # type: ignore[assignment] (string path)
-        cfg = {"effect_mode": "mosaic", "t_confirm": 0.65, "t_keep": 0.55}  # mock config
-        RedactionPipeline(cfg)
-        after = set(str(p) for p in Path(".").rglob("*"))  # type: ignore[assignment]
 
-        assert before == after
+def _frame() -> np.ndarray:
+    return np.zeros((48, 64, 3), dtype=np.uint8)
 
 
 class TestProcessFrame:
-    def test_no_faces_returns_unseen(self):
-        from consented_face_redactor.pipeline import ProcessResult, TrackState, RedactionPipeline
+    def test_no_face_returns_unseen_without_mutating_input(self):
+        pipeline = _pipeline()
+        frame = np.random.default_rng(7).integers(
+            0, 255, (48, 64, 3), dtype=np.uint8
+        )
+        original = frame.copy()
 
-        cfg = {"effect_mode": "mosaic", "t_confirm": 0.65, "t_keep": 0.55}
-        pipe = RedactionPipeline(cfg)  # type: ignore[arg-type] (mock config stub)
-
-        frame = np.zeros((48, 64, 3), dtype=np.uint8)
-        result = pipe.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
+        result = pipeline.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
 
         assert isinstance(result, ProcessResult)
         assert result.is_redacted is False
         assert result.review_required is False
-        assert result.track_state == TrackState.UNSEEN
+        assert result.track_state is TrackState.UNSEEN
+        np.testing.assert_array_equal(frame, original)
+        assert result.result_frame is not frame
 
-    def test_input_not_mutated(self):
-        from consented_face_redactor.pipeline import RedactionPipeline
+    def test_confirmed_track_without_face_transitions_to_lost(self):
+        pipeline = _pipeline()
+        pipeline.load_track_state({"track_state": "confirmed", "frame_index": 3})
 
-        cfg = {"effect_mode": "mosaic", "t_confirm": 0.65, "t_keep": 0.55}
-        pipe = RedactionPipeline(cfg)  # type: ignore[arg-type]
+        result = pipeline.process_frame(_frame(), 4, 0.2, state=None)
 
-        original = np.random.randint(0, 255, (48, 64, 3), dtype=np.uint8)
-        frame_copy = original.copy()
+        assert result.track_state is TrackState.LOST
+        assert result.review_required is True
+        assert pipeline.current_track_state is TrackState.LOST
 
-        result = pipe.process_frame(original, frame_index=0, timestamp=0.0, state=None)
+    def test_frame_index_reversal_expires_track(self):
+        pipeline = _pipeline()
+        pipeline.process_frame(_frame(), 5, 0.2, state=None)
 
-        # Input should be identical after processing
-        np.testing.assert_array_equal(frame_copy, original)
+        result = pipeline.process_frame(_frame(), 4, 0.3, state=None)
+
+        assert result.track_state is TrackState.EXPIRED
+        assert result.review_required is True
+
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            np.zeros((4, 4), dtype=np.uint8),
+            np.zeros((4, 4, 3), dtype=np.float32),
+            np.zeros((0, 4, 3), dtype=np.uint8),
+        ],
+    )
+    def test_rejects_invalid_frame(self, frame):
+        with pytest.raises(ValueError):
+            _pipeline().process_frame(frame, 0, 0.0, None)
+
+    @pytest.mark.parametrize("frame_index", [-1, True, 1.5])
+    def test_rejects_invalid_frame_index(self, frame_index):
+        with pytest.raises(ValueError):
+            _pipeline().process_frame(_frame(), frame_index, 0.0, None)
+
+    @pytest.mark.parametrize("timestamp", [-0.1, float("nan"), float("inf"), True])
+    def test_rejects_invalid_timestamp(self, timestamp):
+        with pytest.raises((TypeError, ValueError)):
+            _pipeline().process_frame(_frame(), 0, timestamp, None)
 
 
 class TestTrackStatePersistence:
-    def test_save_load_roundtrip(self):
-        from consented_face_redactor.pipeline import RedactionPipeline
+    def test_save_and_load_round_trip_uses_controlled_string(self):
+        pipeline = _pipeline()
+        pipeline.load_track_state({"track_state": "candidate", "frame_index": 42})
 
-        cfg = {"effect_mode": "mosaic", "t_confirm": 0.65, "t_keep": 0.55}
-        pipe = RedactionPipeline(cfg)  # type: ignore[arg-type]
+        snapshot = pipeline.save_track_state()
 
-        # Simulate some state changes (normally done internally)
-        pipe._track_state = "candidate"  # type: ignore[attr-defined]
-        pipe._frame_index = 42
+        assert snapshot == {"track_state": "candidate", "frame_index": 42}
+        assert pipeline.current_track_state is TrackState.CANDIDATE
 
-        snapshot = pipe.save_track_state()
-        pipe.load_track_state(snapshot)
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            None,
+            {},
+            {"track_state": "unknown", "frame_index": 0},
+            {"track_state": "unseen", "frame_index": True},
+            {"track_state": "unseen", "frame_index": -2},
+            {"track_state": "unseen", "frame_index": 0, "extra": 1},
+        ],
+    )
+    def test_rejects_invalid_snapshot_without_partial_update(self, snapshot):
+        pipeline = _pipeline()
+        pipeline.load_track_state({"track_state": "candidate", "frame_index": 7})
+        with pytest.raises(ValueError):
+            pipeline.load_track_state(snapshot)
+        assert pipeline.save_track_state() == {
+            "track_state": "candidate",
+            "frame_index": 7,
+        }
 
-        assert pipe.current_track_state == "candidate"  # type: ignore[comparison-overlap] (for testing)
-        assert pipe._frame_index == 42  # type: ignore[attr-defined]
 
-
-class TestDeterminism:
-    def test_deterministic_output_for_stub(self):
-        """For the same stub input, result_frame must be byte-identical."""
-        from consented_face_redactor.pipeline import RedactionPipeline
-
-        cfg = {"effect_mode": "mosaic", "t_confirm": 0.65, "t_keep": 0.55}
-        pipe1 = RedactionPipeline(cfg)  # type: ignore[arg-type]
-        pipe2 = RedactionPipeline(cfg)  # type: ignore[arg-type]
-
-        frame = np.ones((48, 64, 3), dtype=np.uint8) * 128
-
-        r1 = pipe1.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
-        r2 = pipe2.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
-
-        np.testing.assert_array_equal(r1.result_frame, r2.result_frame)
+def test_stub_output_is_deterministic():
+    frame = np.ones((48, 64, 3), dtype=np.uint8) * 128
+    first = _pipeline().process_frame(frame, 0, 0.0, None)
+    second = _pipeline().process_frame(frame, 0, 0.0, None)
+    np.testing.assert_array_equal(first.result_frame, second.result_frame)

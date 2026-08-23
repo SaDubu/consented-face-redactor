@@ -9,6 +9,7 @@ The input frame is never mutated by default; all operations return new objects.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -40,7 +41,7 @@ class MatchDecision(NamedTuple):
     profile_id: str | None                            # opaque profile ID if matched
 
 
-class TrackState(str):
+class TrackState(str, Enum):
     """Track state machine values."""
     UNSEEN = "unseen"
     CANDIDATE = "candidate"
@@ -70,9 +71,9 @@ class RedactionPipeline:
     """
 
     def __init__(self, config) -> None:  # type: ignore[no-untyped-def] (Config class imported by caller)
-        self._config = config if hasattr(config, "effect_mode") else config
+        self._config = config
         self._track_state: TrackState = TrackState.UNSEEN
-        self._frame_index: int = 0
+        self._frame_index: int = -1
 
     @property
     def current_track_state(self) -> TrackState:
@@ -95,6 +96,34 @@ class RedactionPipeline:
             track_state : TrackState after evaluation
             review_required : bool — frame ranges needing manual review
         """
+        if not isinstance(frame, np.ndarray):
+            raise TypeError("frame must be a numpy array")
+        if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError("frame must be a uint8 array with shape (H, W, 3)")
+        if frame.shape[0] < 1 or frame.shape[1] < 1:
+            raise ValueError("frame dimensions must be positive")
+        if isinstance(frame_index, bool) or not isinstance(frame_index, int) or frame_index < 0:
+            raise ValueError("frame_index must be a non-negative integer")
+        if isinstance(timestamp, bool) or not isinstance(
+            timestamp, (int, float, np.integer, np.floating)
+        ):
+            raise TypeError("timestamp must be numeric")
+        timestamp = float(timestamp)
+        if not np.isfinite(timestamp) or timestamp < 0:
+            raise ValueError("timestamp must be finite and non-negative")
+        if state is not None:
+            self.load_track_state(state)
+
+        if frame_index < self._frame_index:
+            self._track_state = TrackState.EXPIRED
+            self._frame_index = frame_index
+            return ProcessResult(
+                result_frame=frame.copy(),
+                is_redacted=False,
+                track_state=self._track_state,
+                review_required=True,
+            )
+
         # Phase 3: stub detector returns no detections (empty list).
         # Real integration happens in Phase 6.
         detections = DetectionResult(
@@ -107,17 +136,28 @@ class RedactionPipeline:
         # previous track was CONFIRMED and now lost.
         if not detections.bboxes:
             if self._track_state == TrackState.CONFIRMED:
-                # Potential loss — would transition to LOST in full impl
+                self._track_state = TrackState.LOST
+                self._frame_index = frame_index
                 return ProcessResult(
                     result_frame=frame.copy(),
                     is_redacted=False,
                     track_state=self._track_state,
                     review_required=True,
                 )
+            if self._track_state in (TrackState.LOST, TrackState.EXPIRED):
+                self._frame_index = frame_index
+                return ProcessResult(
+                    result_frame=frame.copy(),
+                    is_redacted=False,
+                    track_state=self._track_state,
+                    review_required=True,
+                )
+            self._track_state = TrackState.UNSEEN
+            self._frame_index = frame_index
             return ProcessResult(
                 result_frame=frame.copy(),
                 is_redacted=False,
-                track_state=TrackState.UNSEEN,
+                track_state=self._track_state,
                 review_required=False,
             )
 
@@ -133,12 +173,24 @@ class RedactionPipeline:
     def save_track_state(self) -> Any:
         """Serialize current track state for persistence."""
         return {
-            "track_state": self._track_state,
+            "track_state": self._track_state.value,
             "frame_index": self._frame_index,
         }
 
     def load_track_state(self, snapshot: Any) -> None:
         """Restore track state from serialized snapshot."""
-        if isinstance(snapshot, dict):
-            self._track_state = TrackState(snapshot.get("track_state", "unseen"))
-            self._frame_index = snapshot.get("frame_index", 0)
+        if not isinstance(snapshot, dict) or set(snapshot) != {"track_state", "frame_index"}:
+            raise ValueError("track state snapshot has an invalid schema")
+        try:
+            track_state = TrackState(snapshot["track_state"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("track state snapshot has an invalid state") from exc
+        frame_index = snapshot["frame_index"]
+        if (
+            isinstance(frame_index, bool)
+            or not isinstance(frame_index, int)
+            or frame_index < -1
+        ):
+            raise ValueError("track state snapshot has an invalid frame index")
+        self._track_state = track_state
+        self._frame_index = frame_index

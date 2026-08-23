@@ -13,7 +13,7 @@
   {
     "model_id": "sface-0630",
     "role": "embedder",
-    "source": "opencv/opencv_zoo/models/face_detection_yunet",
+    "source": "opencv/opencv_zoo/models/face_recognition_sface",
     "filename": "sface_0630.onnx",
     "sha256": "b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567a",
     "license": "Apache-2.0",

@@ -4,7 +4,9 @@
 
 ## Status
 
-`PLANNING / HERMES_RUNTIME_UNRESOLVED` - 구현 코드, 모델 weight, 참조 얼굴, 영상, embedding, 출력 파일은 아직 저장소에 포함하지 않습니다. 이 저장소는 공개 상태이므로 문서와 재배포가 명시적으로 허용된 asset만 추적합니다.
+`PHASE_4 IMPLEMENTED / INTERMEDIATE REVIEWED` - 구성 검증, 모델 manifest, OpenCV YuNet/SFace adapter, 기본 media I/O, 로컬 gallery와 matcher까지 구현되어 있습니다. Renderer, tracker, end-to-end CLI와 실제 모델 기반 평가는 아직 구현되지 않았습니다.
+
+모델 weight, 참조 얼굴, 영상, embedding, 출력 파일은 저장소에 포함하지 않습니다. 이 저장소는 공개 상태이므로 문서와 재배포가 명시적으로 허용된 asset만 추적합니다.
 
 ## Product boundary
 

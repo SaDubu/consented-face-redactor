@@ -15,25 +15,30 @@ import numpy as np
 
 @dataclass(frozen=True)
 class BoundingBox:
-    """Face bounding box in pixel coordinates (x1, y1, x2, y2)."""
+    """Half-open face bounding box in pixel coordinates: ``[x1, x2)``."""
     x1: int
     y1: int
     x2: int
     y2: int
 
+    def __post_init__(self) -> None:
+        values = (self.x1, self.y1, self.x2, self.y2)
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+            raise TypeError("bounding-box coordinates must be integers")
+        if self.x2 <= self.x1 or self.y2 <= self.y1:
+            raise ValueError("bounding box must have positive width and height")
+
     @property
     def width(self) -> int:
-        return self.x2 - self.x1 + 1
+        return self.x2 - self.x1
 
     @property
     def height(self) -> int:
-        return self.y2 - self.y1 + 1
+        return self.y2 - self.y1
 
     @property
     def area(self) -> int:
-        w = max(0, self.width)
-        h = max(0, self.height)
-        return w * h
+        return self.width * self.height
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,32 @@ class FaceDetection:
     bbox: BoundingBox  # top-level bounding box in image coords
     landmarks: np.ndarray  # shape (5,2), float32, aligned to bbox
     confidence: float  # detector confidence score, range [0,1]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.bbox, BoundingBox):
+            raise TypeError("bbox must be a BoundingBox")
+        landmarks = np.asarray(self.landmarks, dtype=np.float32)
+        if landmarks.shape != (5, 2) or not np.isfinite(landmarks).all():
+            raise ValueError("landmarks must be a finite float32 array with shape (5, 2)")
+        if isinstance(self.confidence, bool) or not isinstance(
+            self.confidence, (int, float, np.floating)
+        ):
+            raise TypeError("confidence must be numeric")
+        confidence = float(self.confidence)
+        if not np.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence must be finite and in [0, 1]")
+        landmarks = landmarks.copy()
+        landmarks.setflags(write=False)
+        object.__setattr__(self, "landmarks", landmarks)
+        object.__setattr__(self, "confidence", confidence)
+
+    def as_yunet_row(self) -> np.ndarray:
+        """Return the 15-value row expected by OpenCV ``alignCrop``."""
+        row = np.empty(15, dtype=np.float32)
+        row[:4] = (self.bbox.x1, self.bbox.y1, self.bbox.width, self.bbox.height)
+        row[4:14] = self.landmarks.reshape(-1)
+        row[14] = self.confidence
+        return row
 
 
 class DetectorAdapter(abc.ABC):
@@ -59,7 +90,7 @@ class DetectorAdapter(abc.ABC):
         Parameters
         ----------
         image : np.ndarray
-            Input image — may be BGR or RGB; dtype uint8. Never mutated.
+            Input image in BGR channel order; dtype uint8. Never mutated.
 
         Returns
         -------
@@ -80,17 +111,17 @@ class EmbedderAdapter(abc.ABC):
     @abc.abstractmethod
     def embed(
         self,
-        face_crop: np.ndarray,
-        landmarks: np.ndarray,
+        image: np.ndarray,
+        detection: FaceDetection,
     ) -> tuple[np.ndarray, int]:
-        """Extract normalized embedding from a aligned face crop.
+        """Align a detected face and extract a normalized embedding.
 
         Parameters
         ----------
-        face_crop : np.ndarray
-            Aligned face image (e.g. 112x112 RGB, uint8). Never mutated.
-        landmarks : np.ndarray
-            Five-point landmarks used for alignment (5,2).
+        image : np.ndarray
+            Original BGR uint8 image. Never mutated.
+        detection : FaceDetection
+            Bounding box, five landmarks, and detector confidence.
 
         Returns
         -------

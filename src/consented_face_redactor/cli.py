@@ -1,14 +1,4 @@
-"""Command-line interface skeleton for consented-face-redactor.
-
-Current commands (stub):
-    validate-models
-    inspect-config
-    process-image   (placeholder)
-    process-video   (placeholder)
-    enroll          (placeholder)
-
-Only 'inspect-config' is fully implemented in this phase — it reads and prints the config dict.
-"""
+"""Command-line validation entry points for consented-face-redactor."""
 
 from __future__ import annotations
 
@@ -27,7 +17,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # inspect-config
     cfg = sub.add_parser("inspect-config", help="Validate and print the configuration schema")
-    cfg.add_argument("--file", "-f", default=None, help="Path to config file (JSON or Python script)")
+    cfg.add_argument("--file", "-f", default=None, help="Path to a JSON config file")
     cfg.add_argument("--verbose", action="store_true", help="Print field descriptions")
 
     # validate-models
@@ -39,23 +29,36 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _cmd_inspect_config(args: argparse.Namespace) -> int:
     print("=" * 60)
-    print("Config schema inspection (Phase 1 — skeleton)")
+    print("Config schema inspection")
     print("=" * 60)
 
-    # Show all available fields and defaults
     from consented_face_redactor.config import Config, EffectMode, UncertainPolicy
 
-    cfg = Config.default()
+    if args.file is None:
+        cfg = Config.default()
+    else:
+        config_path = Path(args.file)
+        try:
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("configuration must be a JSON object")
+            cfg = Config.from_dict(raw)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"Error: invalid config '{config_path.name}': {exc}", file=sys.stderr)
+            return 2
+
     d = cfg.to_dict()
 
     for slot in Config.__slots__:
         val = d[slot]
+        if slot.endswith("_path") and val is not None:
+            val = "<configured>"
         print(f"  {slot}: {val!r}")
 
     if args.verbose:
         print("\n--- Enum values ---")
         print(f"  EffectMode: {[e.value for e in EffectMode]}")
-        print(f"  UncertainPolicy: {{[e.value for e in UncertainPolicy]}}")
+        print(f"  UncertainPolicy: {[e.value for e in UncertainPolicy]}")
 
     print()
     print("Schema is valid. No files created.")
@@ -63,14 +66,53 @@ def _cmd_inspect_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_validate_models(args: argparse.Namespace) -> int:
-    """Stub — real implementation in Phase 2."""
-    print("[WARN] validate-models: stub (Phase 1 skeleton)")
-    print(f"  manifest dir: {args.manifest_dir}")
-    print("Expected format: JSON with keys [model_id, role, source, filename, sha256, license]")
+    """Validate every JSON manifest and its colocated model binary."""
+    from consented_face_redactor.model_manifest import (
+        ManifestValidationError,
+        load_manifest_from_json,
+        verify_model_file,
+    )
+
+    manifest_dir = Path(args.manifest_dir)
+    if not manifest_dir.is_dir():
+        print("Error: manifest directory is unavailable", file=sys.stderr)
+        return 2
+
+    manifest_paths = sorted(manifest_dir.glob("*.json"))
+    if not manifest_paths:
+        print("Error: no JSON manifests found", file=sys.stderr)
+        return 2
+
+    verified = 0
+    seen_model_ids: set[str] = set()
+    seen_filenames: set[str] = set()
+    try:
+        for manifest_path in manifest_paths:
+            entries = load_manifest_from_json(manifest_path)
+            if not entries:
+                raise ManifestValidationError("Manifest contains no model entries")
+            for entry in entries:
+                if entry["model_id"] in seen_model_ids:
+                    raise ManifestValidationError("Duplicate model_id across manifests")
+                normalized_filename = entry["filename"].casefold()
+                if normalized_filename in seen_filenames:
+                    raise ManifestValidationError("Duplicate filename across manifests")
+                seen_model_ids.add(entry["model_id"])
+                seen_filenames.add(normalized_filename)
+                verify_model_file(entry, manifest_dir / entry["filename"])
+                verified += 1
+    except (OSError, ManifestValidationError) as exc:
+        print(f"Error: model validation failed: {exc}", file=sys.stderr)
+        return 2
+
+    if verified == 0:
+        print("Error: manifests contain no model entries", file=sys.stderr)
+        return 2
+    print(f"Validated {verified} model file(s) from {len(manifest_paths)} manifest(s).")
     return 0
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 

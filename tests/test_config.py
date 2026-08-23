@@ -70,6 +70,14 @@ class TestValidInputs:
         cfg = Config(t_confirm=0.7, t_keep=0.4)
         assert cfg.t_confirm > cfg.t_keep
 
+    def test_float_fields_are_canonicalized(self):
+        from consented_face_redactor.config import Config
+
+        cfg = Config(sticker_scale_f=1, t_confirm=1, t_keep=0)
+        assert isinstance(cfg.sticker_scale_f, float)
+        assert isinstance(cfg.t_confirm, float)
+        assert isinstance(cfg.t_keep, float)
+
     def test_input_and_output_paths_valid(self, tmp_path: Path):
         from consented_face_redactor.config import Config
 
@@ -175,6 +183,37 @@ class TestInvalidInputs:
             Config(t_keep=float("inf"), t_confirm=0.9)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"mosaic_block_size_px": True},
+            {"mosaic_padding_px": False},
+            {"t_confirm": True},
+            {"track_lost_ttl_frames": True},
+        ],
+    )
+    def test_rejects_boolean_numeric_values(self, kwargs):
+        from consented_face_redactor.config import Config
+
+        with pytest.raises(ValueError):
+            Config(**kwargs)
+
+    def test_rejects_empty_and_remote_paths(self):
+        from consented_face_redactor.config import Config
+
+        with pytest.raises(ValueError, match="empty"):
+            Config(input_path="   ")
+        with pytest.raises(ValueError, match="local filesystem"):
+            Config(input_path="https://example.invalid/input.mp4")
+
+    def test_error_does_not_echo_token_like_effect_value(self):
+        from consented_face_redactor.config import Config
+
+        secret = "A" * 48
+        with pytest.raises(ValueError) as error:
+            Config(effect_mode=secret)
+        assert secret not in str(error.value)
+
+    @pytest.mark.parametrize(
         "uncertain_policy", ["aggressive", "auto_reject", "__fake__"],
     )
     def test_reject_invalid_uncertain_policy(self, uncertain_policy: str):
@@ -190,6 +229,12 @@ class TestInvalidInputs:
 
 
 class TestFromDictRejection:
+    def test_reject_non_object_payload(self):
+        from consented_face_redactor.config import Config
+
+        with pytest.raises(ValueError, match="object"):
+            Config.from_dict([])  # type: ignore[arg-type]
+
     def test_reject_unknown_key(self):
         from consented_face_redactor.config import Config
 
@@ -240,3 +285,10 @@ class TestSerialization:
                 assert r_val == pytest.approx(o_val), f"{key} mismatch"
             else:
                 assert r_val == o_val, f"{key} mismatch"
+
+    def test_config_is_immutable_after_validation(self):
+        from consented_face_redactor.config import Config
+
+        config = Config.default()
+        with pytest.raises(AttributeError, match="immutable"):
+            config.t_confirm = 2.0

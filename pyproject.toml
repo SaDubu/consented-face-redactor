@@ -8,18 +8,18 @@ version = "0.1.0"
 description = "Consented face redaction tool with mosaic and sticker rendering"
 requires-python = ">=3.12"
 license = {text = "UNLICENSED"}
-dependencies = []
+dependencies = [
+    "numpy>=1.26,<3",
+]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4",
-    "numpy>=1.26",
-    "opencv-python-headless>=4.8",
-    "pydantic>=2.5",
+    "pytest>=7.4,<10",
+    "opencv-python-headless>=4.8,<6",
 ]
 inference = [
     "onnxruntime>=1.16",
-    "numpy>=1.26",
+    "opencv-python-headless>=4.8,<6",
 ]
 
 [project.scripts]

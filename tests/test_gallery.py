@@ -1,179 +1,238 @@
-"""Tests for LocalGallery — deterministic ordering, malformed input rejection, calibrated threshold fixture support."""
+"""Tests for validated enrollment, matching, and gallery persistence."""
 
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-# Allow importing src without install
-_HERE = Path(__file__).resolve().parent.parent / "src"
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-
 from consented_face_redactor.gallery import (
     EnrollmentValidationError,
     LocalGallery,
-    MatchResult,
+    LocalGalleryError,
+    VectorCollisionError,
 )
 
 
-class TestEnrollmentValidation:
-    """Phase 4 §4.1: quality gates on enrollment."""
+def _unit(values) -> np.ndarray:
+    vector = np.asarray(values, dtype=np.float32)
+    return vector / np.linalg.norm(vector)
 
-    def test_enrolls_valid_embedding(self):
-        """Valid normalized vector should create one profile and return opaque ID."""
-        vec = np.array([0.6, 0.8, 0.0]) / np.linalg.norm([0.6, 0.8, 0.0])
+
+class TestEnrollment:
+    def test_normalizes_before_storing(self):
         gallery = LocalGallery()
-        pid = gallery.enroll(vec)
-        assert pid.startswith("prof-")
-        assert len(gallery.profile_ids) == 1
+        profile_id = gallery.enroll(np.array([3.0, 4.0, 0.0]))
 
-    def test_enrollment_rejects_2d_vector(self):
-        """Non-1-D embedding → EnrollmentValidationError."""
-        vec = np.array([[0.6, 0.8]])
+        stored = np.asarray(gallery.to_dict()["profiles"][profile_id]["vectors"][0])
+        np.testing.assert_allclose(stored, [0.6, 0.8, 0.0])
+        assert gallery.embedding_dimension == 3
+
+    def test_adds_multiple_references_to_one_profile(self):
         gallery = LocalGallery()
-        with pytest.raises(EnrollmentValidationError, match="invalid_shape"):
-            gallery.enroll(vec)
+        profile_id = gallery.enroll(_unit([1.0, 0.0, 0.0]))
 
-    def test_enrollment_rejects_non_finite(self):
-        """Vector containing NaN/Inf → EnrollmentValidationError."""
-        vec = np.array([np.nan, 0.8, 0.2])
+        returned_id = gallery.add_reference(profile_id, _unit([0.98, 0.2, 0.0]))
+
+        profile = gallery.to_dict()["profiles"][profile_id]
+        assert returned_id == profile_id
+        assert gallery.profile_count == 1
+        assert profile["v_count"] == 2
+        assert len(profile["vectors"]) == 2
+
+    @pytest.mark.parametrize(
+        "embedding,reason",
+        [
+            (np.array([[0.6, 0.8]]), "invalid_shape"),
+            (np.array([]), "invalid_shape"),
+            (np.array([np.nan, 0.8]), "non_finite_vector"),
+            (np.array([np.inf, 0.8]), "non_finite_vector"),
+            (np.zeros(3), "zero_norm_vector"),
+            (np.array([True, False]), "invalid_dtype"),
+        ],
+    )
+    def test_rejects_malformed_enrollment(self, embedding, reason):
+        with pytest.raises(EnrollmentValidationError) as error:
+            LocalGallery().enroll(embedding)
+        assert error.value.reason == reason
+
+    def test_rejects_non_array_input(self):
+        with pytest.raises(EnrollmentValidationError) as error:
+            LocalGallery().enroll([1.0, 0.0])
+        assert error.value.reason == "invalid_type"
+
+    def test_rejects_dimension_change(self):
         gallery = LocalGallery()
-        with pytest.raises(EnrollmentValidationError, match="non.finite"):
-            gallery.enroll(vec)
+        gallery.enroll(_unit([1.0, 0.0, 0.0]))
+        with pytest.raises(EnrollmentValidationError) as error:
+            gallery.enroll(_unit([1.0, 0.0]))
+        assert error.value.reason == "incompatible_embedding"
 
-    def test_enrollment_rejects_zero_norm_vector(self):
-        """Zero vector → EnrollmentValidationError."""
-        vec = np.zeros(3)
+    def test_rejects_duplicate_reference_in_same_profile(self):
         gallery = LocalGallery()
-        with pytest.raises(EnrollmentValidationError, match="zero.norm"):
-            gallery.enroll(vec)
+        vector = _unit([1.0, 0.0, 0.0])
+        profile_id = gallery.enroll(vector)
+        with pytest.raises(EnrollmentValidationError) as error:
+            gallery.add_reference(profile_id, vector.copy())
+        assert error.value.reason == "duplicate_vector"
 
-    def test_enrollment_rejects_duplicate_vector_in_same_profile(self):
-        """Highly similar vectors (>= 0.95 cosine to centroid) should fail."""
-        vec = np.array([1.0, 0.0, 0.0])
+    def test_rejects_cross_profile_collision_without_consuming_id(self):
         gallery = LocalGallery()
-        id1 = gallery.enroll(vec)
+        gallery.enroll(_unit([1.0, 0.0, 0.0]))
 
-        near_dup = vec + np.array([1e-4, 1e-4, 0.0])  # cosine ≈ 0.9999
-        with pytest.raises(EnrollmentValidationError, match="duplicate_vector"):
-            gallery.enroll(near_dup)
+        with pytest.raises(VectorCollisionError):
+            gallery.enroll(_unit([1.0, 0.01, 0.0]))
+
+        second_id = gallery.enroll(_unit([0.0, 1.0, 0.0]))
+        assert second_id == "prof-00000001"
+
+    def test_invalid_profile_does_not_set_gallery_dimension(self):
+        gallery = LocalGallery()
+        with pytest.raises(EnrollmentValidationError):
+            gallery.add_reference("not-a-profile", _unit([1.0, 0.0]))
+        assert gallery.embedding_dimension is None
 
 
 class TestMatch:
-    """Cosine matcher — threshold calibration & result format."""
-
-    def test_exact_self_match_returns_high(self):
-        """Matching a vector against itself should yield 'high' score (cosine=1.0)."""
-        vec = np.array([0.6, 0.8, 0.0]) / np.linalg.norm([0.6, 0.8, 0.0])
+    def test_exact_reference_match_is_high(self):
         gallery = LocalGallery()
-        pid = gallery.enroll(vec)
+        vector = _unit([0.6, 0.8, 0.0])
+        profile_id = gallery.enroll(vector)
 
-        results = gallery.match(vec)
-        assert len(results) == 1
-        assert results[0].profile_id == pid
-        assert results[0].confidence == pytest.approx(1.0, abs=1e-6)
-        assert results[0].score_category == "high"
-        assert results[0].is_match is True
+        result = gallery.match(vector)[0]
 
-    def test_unrelated_faces_below_medium_threshold(self):
-        """Orthogonal vectors should receive 0 cosine and not appear."""
-        v1 = np.array([1.0, 0.0, 0.0])
-        v2 = np.array([0.0, 1.0, 0.0])
+        assert result.profile_id == profile_id
+        assert result.confidence == pytest.approx(1.0)
+        assert result.score_category == "high"
+        assert result.is_match is True
+
+    def test_compares_individual_references_as_well_as_centroid(self):
         gallery = LocalGallery()
-        gallery.enroll(v1)
+        profile_id = gallery.enroll(_unit([1.0, 0.0, 0.0]))
+        second = _unit([0.8, 0.6, 0.0])
+        gallery.add_reference(profile_id, second)
 
-        results = gallery.match(v2, confidence_threshold=0.5)
-        assert len(results) == 0
+        result = gallery.match(second)[0]
 
-    def test_match_filters_by_confidence_threshold(self):
-        """results[confidence] < threshold should be excluded from return."""
-        vec = np.array([1.0, 0.1, 0.0]) / np.linalg.norm([1.0, 0.1, 0.0])
+        assert result.confidence == pytest.approx(1.0)
+
+    def test_filters_below_threshold(self):
         gallery = LocalGallery()
-        gallery.enroll(vec)
+        gallery.enroll(_unit([1.0, 0.0, 0.0]))
+        assert gallery.match(_unit([0.0, 1.0, 0.0]), confidence_threshold=0.5) == []
 
-        # Threshold exactly at max cosine so any ≤1.0 result gets dropped
-        results = gallery.match(vec, confidence_threshold=1.0 + 1e-9)
-        assert len(results) == 0
+    def test_uses_calibrated_categories(self):
+        gallery = LocalGallery(high_threshold=0.9, medium_threshold=0.5)
+        gallery.enroll(_unit([1.0, 0.0]))
 
-    def test_match_returns_controlled_enumeration(self):
-        """Results must use controlled categories: high/medium/nomatch."""
-        vec = np.array([0.82, 0.57, 0.04]) / np.linalg.norm([0.82, 0.57, 0.04])
+        result = gallery.match(_unit([0.8, 0.6]))[0]
+
+        assert result.confidence == pytest.approx(0.8)
+        assert result.score_category == "medium"
+
+    def test_orders_ties_by_opaque_profile_id(self):
+        gallery = LocalGallery(profile_collision_threshold=0.99)
+        first = gallery.enroll(_unit([1.0, 0.0, 0.0]))
+        second = gallery.enroll(_unit([0.0, 1.0, 0.0]))
+
+        results = gallery.match(_unit([1.0, 1.0, 0.0]), top_k=2)
+
+        assert [result.profile_id for result in results] == [first, second]
+
+    @pytest.mark.parametrize("top_k", [0, -1, True, 1.5])
+    def test_rejects_invalid_top_k(self, top_k):
+        with pytest.raises(ValueError):
+            LocalGallery().match(_unit([1.0, 0.0]), top_k=top_k)
+
+    @pytest.mark.parametrize("threshold", [float("nan"), -1.01, 1.01, True])
+    def test_rejects_invalid_confidence_threshold(self, threshold):
+        with pytest.raises((TypeError, ValueError)):
+            LocalGallery().match(
+                _unit([1.0, 0.0]), confidence_threshold=threshold
+            )
+
+    def test_empty_match_does_not_mutate_dimension(self):
         gallery = LocalGallery()
-        pid = gallery.enroll(vec)
-
-        close_vec = vec + np.array([0.01, -0.01, 0.0])
-        results = gallery.match(close_vec)
-        assert len(results) >= 1
-        for res in results:
-            assert res.score_category in ("high", "medium", "nomatch")
-
-    def test_multiple_candidates(self):
-        """Multiple enrollments should allow matching against all profiles."""
-        v1 = np.array([1.0, 0.0, 0.0]) / np.linalg.norm([1.0, 0.0, 0.0])
-        v2 = np.array([0.7, 0.7, 0.0]) / np.linalg.norm([0.7, 0.7, 0.0])  # ~45deg rotation
-        gallery = LocalGallery()
-        pid1 = gallery.enroll(v1)
-        pid2 = gallery.enroll(v2)
-
-        results = gallery.match(v1, top_k=2)
-        assert len(results) == 2
-        assert results[0].profile_id == pid1  # highest similarity first
+        assert gallery.match(_unit([1.0, 0.0])) == []
+        assert gallery.embedding_dimension is None
 
 
 class TestPersistence:
-    """Gallery save/load round-trip and serialization integrity."""
+    def test_save_and_load_round_trip(self, tmp_path):
+        gallery = LocalGallery(high_threshold=0.9, medium_threshold=0.4)
+        profile_id = gallery.enroll(_unit([1.0, 0.0, 0.0]))
+        gallery.add_reference(profile_id, _unit([0.8, 0.6, 0.0]))
+        path = tmp_path / "gallery.json"
 
-    def test_save_and_load_roundtrip(self, tmp_path):
-        """save() + load() should preserve all profile data."""
+        gallery.save(path)
+        restored = LocalGallery()
+        restored.load(path)
+
+        assert restored.to_dict() == gallery.to_dict()
+        assert restored.match(_unit([0.8, 0.6, 0.0]))[0].confidence == 1.0
+        assert not list(tmp_path.glob(".gallery.json.*.tmp"))
+
+    def test_serialization_contains_only_approved_profile_fields(self):
         gallery = LocalGallery()
-        v1 = np.array([0.6, 0.8, 0.0]) / np.linalg.norm([0.6, 0.8, 0.0])
-        pid1 = gallery.enroll(v1)
+        gallery.enroll(_unit([1.0, 0.0]))
+        payload = gallery.to_dict()
 
-        gallery_path = tmp_path / "gallery.json"
-        gallery.save(gallery_path)
+        profile = next(iter(payload["profiles"].values()))
+        assert set(profile) == {"version", "v_count", "centroid", "vectors"}
+        serialized = json.dumps(payload).lower()
+        for forbidden in ("human_name", "source_path", "raw_crop", "debug_frame"):
+            assert forbidden not in serialized
 
-        new_gallery = LocalGallery()
-        new_gallery.load(gallery_path)
-        assert new_gallery.profile_count == 1
-        assert new_gallery.profile_ids == [pid1]
-
-
-class TestSerialization:
-    """from_dict/to_dict round-trip for test fixtures."""
-
-    def test_to_dict_returns_expected_structure(self):
-        """to_dict should return a dict with 'version', 'next_profile_counter', 'profiles'."""
-        vec = np.array([0.6, 0.8, 0.0]) / np.linalg.norm([0.6, 0.8, 0.0])
+    def test_to_dict_is_detached_from_internal_state(self):
         gallery = LocalGallery()
-        gallery.enroll(vec)
+        profile_id = gallery.enroll(_unit([1.0, 0.0]))
+        payload = gallery.to_dict()
+        payload["profiles"][profile_id]["vectors"][0][0] = 0.0
 
-        d = gallery.to_dict()
-        assert "version" in d
-        assert "next_profile_counter" in d
-        assert "profiles" in d
+        assert gallery.match(_unit([1.0, 0.0]))[0].confidence == 1.0
 
-
-class TestDeterministicOrdering:
-    """Profiles must be returned in registration order for deterministic behavior."""
-
-    def test_profile_ids_returns_registration_order(self):
-        """profile_ids should maintain insertion order."""
+    @pytest.mark.parametrize(
+        "mutator",
+        [
+            lambda data: data.update(version=999),
+            lambda data: data.update(extra_field="PII"),
+            lambda data: data.update(next_profile_counter=0),
+            lambda data: data["profiles"]["prof-00000000"].update(human_name="x"),
+            lambda data: data["profiles"]["prof-00000000"].update(
+                centroid=[0.0, 1.0, 0.0]
+            ),
+            lambda data: data["profiles"]["prof-00000000"]["vectors"][0].__setitem__(
+                0, 2.0
+            ),
+        ],
+    )
+    def test_rejects_tampered_payload(self, mutator):
         gallery = LocalGallery()
-        v1 = np.array([1.0, 0.0, 0.0]) / np.linalg.norm([1.0, 0.0, 0.0])
-        v2 = np.array([0.0, 1.0, 0.0]) / np.linalg.norm([0.0, 1.0, 0.0])
+        gallery.enroll(_unit([1.0, 0.0, 0.0]))
+        payload = gallery.to_dict()
+        mutator(payload)
+        with pytest.raises(LocalGalleryError):
+            LocalGallery.from_dict(payload)
 
-        pid1 = gallery.enroll(v1)
-        pid2 = gallery.enroll(v2)
+    def test_load_is_atomic_on_validation_failure(self, tmp_path):
+        gallery = LocalGallery()
+        profile_id = gallery.enroll(_unit([1.0, 0.0]))
+        path = tmp_path / "gallery.json"
+        path.write_text('{"version": 999}', encoding="utf-8")
 
-        ids = gallery.profile_ids
-        assert len(ids) == 2
-        assert ids[0] < ids[1]  # profiles numbered sequentially
+        with pytest.raises(LocalGalleryError):
+            gallery.load(path)
 
+        assert gallery.profile_ids == [profile_id]
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-x"])
+    def test_load_rejects_duplicate_json_keys(self, tmp_path):
+        path = tmp_path / "gallery.json"
+        path.write_text('{"version": 2, "version": 2}', encoding="utf-8")
+        with pytest.raises(LocalGalleryError, match="duplicate key"):
+            LocalGallery().load(path)
+
+    def test_save_requires_existing_parent(self, tmp_path):
+        gallery = LocalGallery()
+        with pytest.raises(LocalGalleryError, match="directory"):
+            gallery.save(tmp_path / "missing" / "gallery.json")

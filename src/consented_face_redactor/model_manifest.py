@@ -39,6 +39,7 @@ REQUIRED_KEYS = [
 ]
 
 VALID_ROLES = {"detector", "embedder", "tracker", "renderer"}
+VALID_PROVIDERS = {"opencv": "OpenCV", "onnxruntime": "ONNXRuntime"}
 
 
 class ManifestValidationError(Exception):
@@ -88,7 +89,7 @@ def _assert_list_of_nonneg_ints(val: Any, key: str) -> list[int]:
         )
     out: list[int] = []
     for i, item in enumerate(val):
-        if not isinstance(item, int) or item < 0:
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
             raise ManifestValidationError(
                 f"Manifest entry '{key}[{i}]' must be a non-negative integer, "
                 f"got {type(item).__name__!r}",
@@ -104,7 +105,7 @@ def _assert_list_of_nonneg_ints(val: Any, key: str) -> list[int]:
 
 
 def _assert_pos_int(val: Any, key: str) -> int:
-    if not isinstance(val, int):
+    if isinstance(val, bool) or not isinstance(val, int):
         raise ManifestValidationError(
             f"Manifest entry '{key}' must be an integer",
             key=key,
@@ -115,6 +116,23 @@ def _assert_pos_int(val: Any, key: str) -> int:
             key=key,
         )
     return val
+
+
+def _assert_filename(val: Any) -> str:
+    filename = _assert_non_empty_str(val, "filename")
+    candidate = Path(filename)
+    if (
+        "/" in filename
+        or "\\" in filename
+        or candidate.name != filename
+        or candidate.is_absolute()
+        or filename in {".", ".."}
+    ):
+        raise ManifestValidationError(
+            "Manifest entry 'filename' must be a plain local filename",
+            key="filename",
+        )
+    return filename
 
 
 # ---- public API ------------------------------------------------------ #
@@ -134,7 +152,7 @@ def validate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
                 key=rk,
             )
 
-    extra = set(raw.keys()) - {"version"} - set(REQUIRED_KEYS)
+    extra = set(raw.keys()) - set(REQUIRED_KEYS)
     if extra:
         raise ManifestValidationError(
             f"Manifest entry has unknown keys: {sorted(extra)}",
@@ -144,7 +162,7 @@ def validate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
     model_id  = _assert_non_empty_str(raw["model_id"], "model_id")
     role      = raw["role"]
     source    = _assert_non_empty_str(raw["source"], "source")
-    filename  = str(raw["filename"])
+    filename  = _assert_filename(raw["filename"])
     sha256_raw= raw["sha256"]
     license_  = _assert_non_empty_str(raw["license"], "license")
     input_shape = raw["input_shape"]
@@ -176,6 +194,12 @@ def validate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
     input_shape = _assert_list_of_nonneg_ints(input_shape, "input_shape")
     preproc  = _assert_pos_int(preproc, "preprocessing_revision")
     provider = _assert_non_empty_str(provider, "provider")
+    canonical_provider = VALID_PROVIDERS.get(provider.lower())
+    if canonical_provider is None:
+        raise ManifestValidationError(
+            f"Manifest entry 'provider' must be one of {sorted(VALID_PROVIDERS.values())}",
+            key="provider",
+        )
 
     return {
         "model_id": model_id,
@@ -186,7 +210,7 @@ def validate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
         "license": license_,
         "input_shape": input_shape,
         "preprocessing_revision": preproc,
-        "provider": provider,
+        "provider": canonical_provider,
     }
 
 
@@ -197,30 +221,56 @@ def verify_model_file(manifest_entry: dict[str, Any], file_path: Path) -> None:
     produces partial state — the caller should discard any loaded object
     if this raises.
     """
-    if not file_path.exists():
+    validated = validate_manifest(manifest_entry)
+    file_path = Path(file_path)
+    if file_path.name != validated["filename"]:
         raise ManifestValidationError(
-            f"Model file does not exist: {file_path}",
-            key="sha256",
+            "Model filename does not match its manifest",
+            key="filename",
+        )
+    if not file_path.is_file():
+        raise ManifestValidationError(
+            f"Model file is unavailable: {file_path.name}",
+            key="filename",
         )
 
     sha = hashlib.sha256()
     buf_size = 1 << 16  # 64 KB
-    with file_path.open("rb") as fh:
-        while True:
-            chunk = fh.read(buf_size)
-            if not chunk:
-                break
-            sha.update(chunk)
+    try:
+        with file_path.open("rb") as fh:
+            while True:
+                chunk = fh.read(buf_size)
+                if not chunk:
+                    break
+                sha.update(chunk)
+    except OSError as exc:
+        raise ManifestValidationError(
+            f"Model file could not be read: {file_path.name}",
+            key="filename",
+        ) from exc
 
     actual_sha = sha.hexdigest()
-    expected_sha = manifest_entry["sha256"].lower()
+    expected_sha = validated["sha256"]
 
     if actual_sha != expected_sha:
         raise ManifestValidationError(
-            f"Model checksum mismatch — expected {expected_sha}, "
-            f"got {actual_sha}",
+            f"Model checksum mismatch: expected {expected_sha}, got {actual_sha}",
             key="sha256",
         )
+
+
+def _json_object_without_duplicate_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ManifestValidationError(
+                "Manifest JSON contains a duplicate key",
+                key="__envelope__",
+            )
+        result[key] = value
+    return result
 
 
 def load_manifest_from_json(json_path: Path) -> list[dict[str, Any]]:
@@ -229,7 +279,18 @@ def load_manifest_from_json(json_path: Path) -> list[dict[str, Any]]:
     Raises ManifestValidationError if any entry or the envelope is invalid.
     Returns a list of validated entry dicts.
     """
-    raw = json.loads(json_path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(
+            json_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_json_object_without_duplicate_keys,
+        )
+    except ManifestValidationError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ManifestValidationError(
+            f"Manifest file is unreadable or invalid: {json_path.name}",
+            key="__envelope__",
+        ) from exc
     if not isinstance(raw, list):
         raise ManifestValidationError(
             "Manifest file must be a JSON array",
@@ -237,12 +298,22 @@ def load_manifest_from_json(json_path: Path) -> list[dict[str, Any]]:
         )
 
     results: list[dict[str, Any]] = []
+    seen_model_ids: set[str] = set()
+    seen_filenames: set[str] = set()
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ManifestValidationError(
                 f"Manifest entry at index {i} is not an object",
                 key=f"[{i}]",
             )
-        results.append(validate_manifest(entry))
+        validated = validate_manifest(entry)
+        if validated["model_id"] in seen_model_ids:
+            raise ManifestValidationError("Duplicate model_id in manifest", key="model_id")
+        normalized_filename = validated["filename"].casefold()
+        if normalized_filename in seen_filenames:
+            raise ManifestValidationError("Duplicate filename in manifest", key="filename")
+        seen_model_ids.add(validated["model_id"])
+        seen_filenames.add(normalized_filename)
+        results.append(validated)
 
     return results

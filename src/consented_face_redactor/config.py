@@ -42,10 +42,12 @@ def _validate_path(p: Any, label: str) -> Path:
     """Convert to absolute path; reject non-path values."""
     if not isinstance(p, (str, Path)):
         raise ValueError(f"{label} must be a string or Path, got {type(p).__name__!r}")
-    resolved = Path(p).resolve()
-    if str(resolved) == "":
+    raw = str(p).strip()
+    if not raw:
         raise ValueError(f"{label} is empty")
-    return resolved
+    if _URL_RE.match(raw) or "://" in raw:
+        raise ValueError(f"{label} must be a local filesystem path")
+    return Path(raw).resolve(strict=False)
 
 
 # ------------------------------------------------------------------ #
@@ -72,6 +74,16 @@ class Config:
         "min_face_area_px",
     )
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name not in self.__slots__:
+            raise AttributeError(f"Unknown configuration field: {name}")
+        try:
+            object.__getattribute__(self, name)
+        except AttributeError:
+            object.__setattr__(self, name, value)
+            return
+        raise AttributeError("Config instances are immutable")
+
     def __init__(
         self,
         *,
@@ -92,9 +104,11 @@ class Config:
         _validate_effect_mode(effect_mode)
         _validate_int_positive(mosaic_block_size_px, "mosaic_block_size_px")
         _validate_int_ge0(mosaic_padding_px, "mosaic_padding_px")
-        _validate_float_range(sticker_scale_f, 0.1, 5.0, "sticker_scale_f")
-        _validate_float_range(t_confirm, 0.0, 1.0, "t_confirm")
-        _validate_float_range(t_keep, 0.0, 1.0, "t_keep")
+        sticker_scale_f = _validate_float_range(
+            sticker_scale_f, 0.1, 5.0, "sticker_scale_f"
+        )
+        t_confirm = _validate_float_range(t_confirm, 0.0, 1.0, "t_confirm")
+        t_keep = _validate_float_range(t_keep, 0.0, 1.0, "t_keep")
         if t_keep >= t_confirm:
             raise ValueError("t_keep must be strictly less than t_confirm")
         _validate_uncertain_policy(uncertain_policy)
@@ -111,17 +125,19 @@ class Config:
             if self.input_path == self.output_path:
                 raise ValueError("input_path and output_path must be distinct")
 
-        _validate_float_range(max_face_area_ratio, 0.1, 1.0, "max_face_area_ratio")
+        max_face_area_ratio = _validate_float_range(
+            max_face_area_ratio, 0.1, 1.0, "max_face_area_ratio"
+        )
         _validate_int_positive(min_face_area_px, "min_face_area_px")
 
         # Freeze values
-        self.effect_mode = effect_mode
+        self.effect_mode = EffectMode(effect_mode).value
         self.mosaic_block_size_px = mosaic_block_size_px
         self.mosaic_padding_px = mosaic_padding_px
         self.sticker_scale_f = sticker_scale_f
         self.t_confirm = t_confirm
         self.t_keep = t_keep
-        self.uncertain_policy = uncertain_policy
+        self.uncertain_policy = UncertainPolicy(uncertain_policy).value
         self.track_lost_ttl_frames = track_lost_ttl_frames
         self.recheck_interval_frames = recheck_interval_frames
         self.max_face_area_ratio = max_face_area_ratio
@@ -143,6 +159,8 @@ class Config:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
+        if not isinstance(data, dict):
+            raise ValueError("Config payload must be an object")
         # Reject unknown keys
         allowed = set(cls.__slots__)
         unknown = set(data.keys()) - allowed
@@ -152,8 +170,8 @@ class Config:
         # Reject any string values that look like URLs or tokens
         for key, val in data.items():
             if isinstance(val, str):
-                _URL_RE.match(val) is None or _raise_val_err(key, val)
-                _TOKEN_RE.match(val) is None or _raise_val_err(key, val)
+                _URL_RE.match(val) is None or _raise_val_err(key)
+                _TOKEN_RE.search(val) is None or _raise_val_err(key)
 
         # Reject NaN / Inf in float values
         for key, val in data.items():
@@ -175,19 +193,22 @@ class Config:
 
 def _validate_effect_mode(v: str) -> None:
     valid = [e.value for e in EffectMode]
-    if v not in valid:
-        raise ValueError(f"effect_mode must be one of {valid}, got {v!r}")
+    if not isinstance(v, str) or v not in valid:
+        raise ValueError(f"effect_mode must be one of {valid}")
 
 
-def _validate_float_range(v: float, lo: float, hi: float, key: str) -> None:
-    if not isinstance(v, (int, float)):
+def _validate_float_range(v: float, lo: float, hi: float, key: str) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
         raise ValueError(f"{key} must be numeric, got {type(v).__name__!r}")
-    if np.isnan(v) or np.isinf(v):
-        _raise_val_err(key, v)
-    # Accept int → cast implicitly? No — keep strict.
-    v = float(v)
-    if not (lo <= v <= hi):
-        raise ValueError(f"{key} must be in [{lo}, {hi}], got {v}")
+    try:
+        value = float(v)
+    except OverflowError:
+        _raise_val_err(key)
+    if not np.isfinite(value):
+        _raise_val_err(key)
+    if not (lo <= value <= hi):
+        raise ValueError(f"{key} must be in [{lo}, {hi}], got {value}")
+    return value
 
 
 def _validate_int_positive(v: int, key: str) -> None:
@@ -195,7 +216,7 @@ def _validate_int_positive(v: int, key: str) -> None:
 
 
 def _validate_int_ge0(v: int, key: str) -> None:
-    if not isinstance(v, int):
+    if isinstance(v, bool) or not isinstance(v, int):
         raise ValueError(f"{key} must be integer, got {type(v).__name__!r}")
     if v < 0:
         raise ValueError(f"{key} must be >= 0, got {v}")
@@ -209,9 +230,9 @@ def _validate_int_ge1(v: int, key: str) -> None:
 
 def _validate_uncertain_policy(v: str) -> None:
     valid = [e.value for e in UncertainPolicy]
-    if v not in valid:
-        raise ValueError(f"uncertain_policy must be one of {valid}, got {v!r}")
+    if not isinstance(v, str) or v not in valid:
+        raise ValueError(f"uncertain_policy must be one of {valid}")
 
 
-def _raise_val_err(key: str, val: Any) -> None:
-    raise ValueError(f"{key} contains disallowed value: {val!r}")
+def _raise_val_err(key: str) -> None:
+    raise ValueError(f"{key} contains a disallowed value")
