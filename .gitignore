@@ -12,6 +12,10 @@ data/
 *.avi
 *.mkv
 
+# Explicitly redistributable project assets may be tracked.
+!assets/stickers/**/*.png
+!assets/stickers/**/*.webp
+
 # Model weights and inference artifacts
 *.onnx
 *.engine
@@ -29,6 +33,7 @@ __pycache__/
 *.py[cod]
 .env
 .env.*
+!.env.example
 
 # Editor and local evidence
 .vscode/

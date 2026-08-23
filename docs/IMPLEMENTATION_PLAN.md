@@ -21,6 +21,8 @@ Process a user-supplied image or video locally. When a face is verified as a use
 - An uncertain match must never transfer a redaction effect to a different face.
 - Logs contain only opaque profile IDs, aggregate counters, redacted errors, and model manifest IDs.
 - Input and output paths must be distinct; output is written atomically when the media backend supports it.
+- Local galleries and processing data use an operator-selected private data root with owner-only filesystem permissions and an explicit deletion workflow.
+- Frames that cannot satisfy the selected confidence policy are reported as review-required time ranges without storing frame pixels in logs.
 
 ## 2. Research-backed baseline
 
@@ -95,7 +97,9 @@ The pipeline must depend on internal interfaces, never raw vendor output. `proce
 - Compare each candidate embedding against both individual vectors and the centroid using cosine similarity.
 - Keep detector confidence, match confidence, and temporal confirmation as different signals.
 - Use a calibrated `T_confirm` threshold to start redaction and a lower bounded `T_keep` only for a recently confirmed track.
-- Apply a strict preset by default: ambiguous candidates are not redacted rather than treated as the target.
+- Keep ambiguity behavior explicit through `uncertain_policy`; do not silently treat it as either target or non-target.
+- Default to `privacy_safe`: maintain only the bounded ROI of a previously confirmed target for a short TTL, never transfer it to another face, and mark unresolved ranges for manual review.
+- Provide `precision`: stop redaction immediately when identity evidence is insufficient, while still reporting the unresolved range.
 
 ### 4.3 Track state
 
@@ -107,6 +111,7 @@ UNSEEN -> CANDIDATE -> CONFIRMED -> LOST -> EXPIRED
 - `CONFIRMED` is periodically re-verified by embedding; motion alone cannot extend it indefinitely.
 - `LOST` may use short TTL motion prediction only to avoid flicker; it cannot jump to another face.
 - A frame-index reversal, association collision, or incompatible embedding expires the track.
+- An expired or collision-affected range is included in the media integrity report as `review_required`; the tool must not claim privacy-complete output while such ranges remain unacknowledged.
 
 ## 5. Delivery phases
 
@@ -116,7 +121,7 @@ Every phase is a separate immutable Task Contract with one isolated worktree, on
 
 **Goal:** prove the exact Hermes agent can use the selected local runner without a wrapper that converts natural language into filesystem or shell actions.
 
-- Fix the Hermes distribution, model tag, runner version, loopback endpoint, context size, and worker Git identity.
+- Complete `docs/HERMES_RUNTIME_GATE.md` with the exact Hermes distribution, model tag, runner version, loopback endpoint, context size, and worker Git identity.
 - Run read-only tool probe, then one-file write canary, then bounded verification/commit/permitted-push canary.
 - Deny arbitrary shell, web access, package installation, external directories, force push, main mutation, reset, rebase, and merge.
 - **Pass:** independently verifiable model-authored file, commit ancestry, scope match, remote SHA, and clean security scan.
@@ -189,7 +194,8 @@ Every phase is a separate immutable Task Contract with one isolated worktree, on
 
 - Preserve frame order, timestamps where supported, FPS, resolution, frame count, duration, and audio stream where required.
 - Use temporary output and atomic rename on success; delete partial output on explicit failure.
-- **Pass:** output reopens successfully and report identifies any media mismatch.
+- Produce a machine-readable report containing media integrity results and review-required frame/time ranges, without frame pixels or biometric vectors.
+- **Pass:** output reopens successfully, the report identifies any media mismatch, and unresolved privacy ranges prevent a clean-complete status.
 
 ### Phase 9: CLI and operational UX
 
@@ -205,6 +211,7 @@ Every phase is a separate immutable Task Contract with one isolated worktree, on
 **Scope:** local-only benchmark runner, protocol document, redacted aggregate report template.
 
 - Measure target recall, non-target false-redaction rate, precision/recall by threshold, effect coverage, identity switches, track fragmentation, processing time, and peak memory.
+- Measure review-required frame rate and separately report target-visible misses versus non-target redactions.
 - Measure 720p and 1080p separately; distinguish decode, detection, embedding, rendering, and encode time.
 - Keep evaluation faces/videos outside repository and publish only aggregate, consent-safe results.
 - **Pass:** Human Owner approves operating threshold and preset behavior based on evidence.
@@ -224,6 +231,7 @@ Every phase is a separate immutable Task Contract with one isolated worktree, on
 | Rendering | ROI bounds, alpha correctness, input immutability |
 | Tracking | crossing/occlusion/re-entry negative tests |
 | Video | output reopen, FPS/resolution/frame-count/duration/audio comparison |
+| Manual review | unresolved frame/time ranges and explicit acknowledgement state |
 | Performance | per-stage timing and peak memory at defined resolutions |
 | Supply chain | model manifest digest and license check |
 | Worker governance | exact task, base SHA, scope, worker commit, remote SHA |
@@ -238,6 +246,6 @@ Every phase is a separate immutable Task Contract with one isolated worktree, on
 
 Stop immediately when scope changes, a model file/license is missing, a face cannot be confidently matched, an effect risks moving to a non-target face, output integrity fails, a forbidden path changes, or a worker cannot perform an allowed action natively.
 
-## 8. First Human decision needed
+## 8. First Human decisions needed
 
-Before Phase 0, record the exact Hermes agent distribution or repository, model tag, intended local runner, and whether the new repository remains public. Do not install or invoke Hermes until those values are approved.
+This repository is public. Before Phase 0, record the exact Hermes agent distribution or repository, model tag, and intended local runner. Before source distribution, select a project code license and record third-party model and sticker license boundaries. Do not install or invoke Hermes until its runtime values are approved.
