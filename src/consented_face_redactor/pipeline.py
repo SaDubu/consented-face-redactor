@@ -3,14 +3,15 @@
 This module provides the core frame processing API:
     process_frame(frame, frame_index, timestamp, state) -> (result_frame, new_state)
 
-It depends only on internal interfaces — never raw vendor output.
+It depends only on internal interfaces -- never raw vendor output.
 The input frame is never mutated by default; all operations return new objects.
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 from enum import Enum
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 
@@ -59,25 +60,78 @@ class ProcessResult(NamedTuple):
 
 
 # ------------------------------------------------------------------ #
-# Pipeline class (placeholder — no real model integration yet)
+# Pipeline class (placeholder -- no real model integration yet)
 # ------------------------------------------------------------------ #
+
+
+if TYPE_CHECKING:
+    from consented_face_redactor.adapters.detection_iface import DetectorAdapter  # noqa: F401
 
 
 class RedactionPipeline:
     """Skeleton pipeline for face redaction processing.
 
-    At this stage the pipeline uses fake detector/embedder stubs and
-    a mock effect renderer. Real implementation will occur in Phase 6+.
+    The pipeline accepts an optional detector which is invoked on every
+    frame when present.  When no detector is supplied the stub path
+    (empty detections) is taken so callers can test downstream logic
+    without requiring inference dependencies.
     """
 
-    def __init__(self, config) -> None:  # type: ignore[no-untyped-def] (Config class imported by caller)
+    def __init__(
+        self,
+        config: Any,  # Config class imported by caller
+        *,
+        detector: 'DetectorAdapter | None' = None,
+    ) -> None:
         self._config = config
+        self._detector = detector
+        self._detects_bgr_input: bool = False
+        if hasattr(self._detector, 'model_id') and (
+            isinstance(self._detector.model_id, str)
+            and self._detector.model_id == 'yunet'
+        ):
+            self._detects_bgr_input = True
         self._track_state: TrackState = TrackState.UNSEEN
         self._frame_index: int = -1
 
     @property
     def current_track_state(self) -> TrackState:
         return self._track_state
+
+    @property
+    def detector_requires_bgr_input(self) -> bool:
+        """Return True when the attached detector expects BGR input."""
+        return self._detects_bgr_input
+
+    @property
+    def has_detector(self) -> bool:
+        """Return True when a detector was provided to the pipeline."""
+        return self._detector is not None
+
+    # -- public detection bridge -------------------------------------- #
+
+    def _run_detector(
+        self,
+        frame: np.ndarray,
+    ) -> list[Any]:
+        """Call the detector on *frame*, handling BGR/RGB colour space.
+
+        Returns a (possibly empty) list of whatever detection rows the
+        detector produces  -- typically instances of
+        ``detection_iface.FaceDetection``.
+        """
+        if self._detector is None:
+            return []
+
+        input_frame = frame
+        if self._detects_bgr_input and frame.dtype == np.uint8 and frame.ndim == 3 and frame.shape[2] == 3:
+            # cvtColor to BGR -- this mirrors the existing adapter contract.
+            # We use the minimal helper that only imports when needed.
+            with suppress(ImportError):
+                import cv2 as _cv2bgr  # type: ignore[import-not-found, unused-ignore]
+                input_frame = _cv2bgr.cvtColor(frame, _cv2bgr.COLOR_BGR2RGB)
+
+        return list(self._detector.detect(input_frame))
 
     def process_frame(
         self,
@@ -92,9 +146,9 @@ class RedactionPipeline:
         -------
         ProcessResult
             result_frame : new array (copy when redaction applied)
-            is_redacted : bool — apply only on confirmed identity
+            is_redacted : bool -- apply only on confirmed identity
             track_state : TrackState after evaluation
-            review_required : bool — frame ranges needing manual review
+            review_required : bool -- frame ranges needing manual review
         """
         if not isinstance(frame, np.ndarray):
             raise TypeError("frame must be a numpy array")
@@ -124,15 +178,34 @@ class RedactionPipeline:
                 review_required=True,
             )
 
-        # Phase 3: stub detector returns no detections (empty list).
-        # Real integration happens in Phase 6.
-        detections = DetectionResult(
-            bboxes=[],
-            landmarks=[],
-            confidences=[],
-        )
+        # Phase 6: call detector when available; otherwise fall back to stub.
+        raw_detections = self._run_detector(frame)
 
-        # No faces detected → always review_required=False unless
+        # Map detector output (FaceDetection objects from detection_iface)
+        # into pipeline's DetectionResult for downstream consumers.
+        if raw_detections:
+            bboxes: list[tuple[float, float, float, float]] = []
+            landmarks: list[np.ndarray] = []
+            confidences: list[float] = []
+            for det in raw_detections:
+                bbox = det.bbox
+                bboxes.append((float(bbox.x1), float(bbox.y1), float(bbox.x2), float(bbox.y2)))
+                feats = det.landmarks  # (5,2) float32 array
+                landmarks.append(feats.copy())
+                confidences.append(float(det.confidence))
+            detections = DetectionResult(
+                bboxes=bboxes,
+                landmarks=landmarks,
+                confidences=confidences,
+            )
+        else:
+            detections = DetectionResult(
+                bboxes=[],
+                landmarks=[],
+                confidences=[],
+            )
+
+        # No faces detected -- always review_required=False unless
         # previous track was CONFIRMED and now lost.
         if not detections.bboxes:
             if self._track_state == TrackState.CONFIRMED:
