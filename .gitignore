@@ -1,0 +1,36 @@
+# Biometric and media material
+reference_faces/
+private_data/
+output/
+data/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Model weights and inference artifacts
+*.onnx
+*.engine
+*.pt
+*.pth
+*.bin
+*.npy
+*.npz
+
+# Python and local tooling
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.py[cod]
+.env
+.env.*
+
+# Editor and local evidence
+.vscode/
+.idea/
+evidence/local/
