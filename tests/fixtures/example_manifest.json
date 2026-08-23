@@ -1,0 +1,24 @@
+[
+  {
+    "model_id": "yunet-10k",
+    "role": "detector",
+    "source": "Shangjin-Xing/YuNet",
+    "filename": "yunet_10k_320_320.onnx",
+    "sha256": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+    "license": "Apache-2.0",
+    "input_shape": [1, 320, 320],
+    "preprocessing_revision": 1,
+    "provider": "OpenCV"
+  },
+  {
+    "model_id": "sface-0630",
+    "role": "embedder",
+    "source": "opencv/opencv_zoo/models/face_detection_yunet",
+    "filename": "sface_0630.onnx",
+    "sha256": "b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567a",
+    "license": "Apache-2.0",
+    "input_shape": [1, 112, 112],
+    "preprocessing_revision": 1,
+    "provider": "OpenCV"
+  }
+]
