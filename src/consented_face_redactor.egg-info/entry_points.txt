@@ -1,0 +1,2 @@
+[console_scripts]
+consented-face-redactor = consented_face_redactor.cli:main
