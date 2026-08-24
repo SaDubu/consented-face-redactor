@@ -31,3 +31,68 @@
 ## Data safety
 
 Never commit face images, video, crops, embeddings, model binaries, generated output, credentials, machine-specific paths, or model reasoning output. A redistributable sticker may be tracked only with source and license metadata.
+
+## Usage
+
+### Quick-start (mosaic mode)
+
+```bash
+# 1. Clone this repo and install dependencies
+$ pip install -e .
+
+# 2. Create a minimal config file (JSON)
+$ cat > run.json <<'EOF'
+{
+    "effect_mode": "mosaic",
+    "input_path": "./samples/input.mp4",
+    "output_path": "./outputs/redacted.mp4"
+}
+EOF
+
+# 3. Run the pipeline
+$ redactor run run.json
+```
+
+### Configuration fields reference
+
+Configuration schema is defined in [docs/CONFIG_SCHEMA.md](docs/CONFIG_SCHEMA.md). Below are the verified production defaults:
+
+| Field                   | Default     | Notes                                                                                             |
+|-------------------------|-------------|---------------------------------------------------------------------------------------------------|
+| `effect_mode`           | `"mosaic"`  | Plain string — `"mosaic"` or `"sticker"`. No EffectMode enum.                                    |
+| `t_confirm`             | 0.65        | Minimum confidence to transition CANDIDATE → CONFIRMED (only after gallery match)                |
+| `t_keep`                | 0.55        | Confidence floor to continue an already CONFIRMED track across brief occlusions                    |
+| `track_lost_ttl_frames` | 10          | Frames to keep a track alive after last detection before EXPIRED                                   |
+| `recheck_interval_frames` | 30        | How often (in frames) to invoke the gallery matcher while tracking CANDIDATE faces                  |
+
+### Configuration examples
+
+**Sticker mode with custom scale:**
+
+```python
+from consented_face_redactor.config import Config
+
+cfg = Config(
+    effect_mode="sticker",           # plain string — NOT EffectMode.STICKER
+    input_path="./samples/input.mp4",
+    output_path="./outputs/redacted_stickered.mp4",
+    t_confirm=0.80,                  # higher bar for confirmed identity
+    recheck_interval_frames=15,      # re-check gallery more frequently
+)
+```
+
+**Mosaic mode with tighter tracking:**
+
+```python
+cfg = Config(
+    effect_mode="mosaic",
+    input_path="./samples/images/photo.jpg",
+    output_path="./outputs/redacted.jpg",
+    t_confirm=0.75,                  # higher confirmation threshold
+    track_lost_ttl_frames=5,         # expire faster when face is lost
+)
+```
+
+### Important — Confidence vs. Identity
+
+Detector confidence alone **never** authorizes CONFIRMED redaction. An explicit gallery identity match is required for the CANDIDATE → CONFIRMED transition. The safety gate always fails closed when the gallery is unavailable or returns no match.

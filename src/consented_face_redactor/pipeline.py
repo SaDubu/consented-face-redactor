@@ -376,24 +376,10 @@ class RedactionPipeline:
                 mean_confidence = 0.0
             self._candidate_score = mean_confidence
 
-            # Direct transition to CONFIRMED if confidence meets threshold
-            if mean_confidence >= self._config.t_confirm and self._config.t_confirm < 1.0:
-                new_state = TrackState.CONFIRMED
-                is_redacted = True
-                review_required = False
-                # Wire Phase 8: apply effect to the detected face bbox on first CONFIRMED entry
-                if detections.bboxes:
-                    out_frame_accumulator = frame.copy()
-                    for one_bbox in detections.bboxes:
-                        out_frame_accumulator = _apply_effect_to_bbox(
-                            out_frame_accumulator,
-                            one_bbox,
-                            self._config.effect_mode,
-                            self._config,
-                            None,  # no pre-built sticker proxy needed here
-                        )
-            else:
-                new_state = TrackState.CANDIDATE
+            # Safety gate: detector confidence alone NEVER authorizes redaction.
+            # Unseen → CANDIDATE always; gallery match in CANDIDANT branch is what
+            # actually authorizes CONFIRMED + redaction.
+            new_state = TrackState.CANDIDATE
 
         elif self._track_state == TrackState.CANDIDATE:
             # Compute running confidence score
@@ -414,8 +400,8 @@ class RedactionPipeline:
             frame_count_since_candidate = (
                 frame_index - self._frame_index if self._frame_index >= 0 else 0
             )
+            matches: list[tuple[str, float]] = []  # default: no matches
             if frame_count_since_candidate >= self._config.recheck_interval_frames:
-                matches: list[tuple[str, float]] = []
                 try:
                     embedding = getattr(self._gallery, 'embed', lambda f=None: None)(frame)
                 except Exception:
@@ -425,17 +411,17 @@ class RedactionPipeline:
                     if isinstance(match_result, list) and len(match_result) > 0:
                         matches = match_result
 
-            # CONFIRMED transition when score meets threshold
-            if self._candidate_score >= self._config.t_confirm and self._config.t_confirm < 1.0:
-                is_confirmed = True
+            # Safety gate: CONFIDENTED transition requires explicit gallery match.
+            # confidence is a quality signal only — it never authorizes redaction.
+            has_gallery_match = matches and len(matches) > 0
 
-            if is_confirmed:
+            if has_gallery_match:
                 new_state = TrackState.CONFIRMED
                 is_redacted = True
                 review_required = False
                 # Extract matched profile from the gallery result (if any)
                 if matches and len(matches) > 0:
-                    self._confirmed_profile_id = float(matches[0][1])  # score as profile proxy
+                    self._confirmed_profile_id = matches[0][0]  # profile_id from gallery match result
                 else:
                     self._confirmed_profile_id = None
                 # Wire Phase 8: apply effect to detected faces on CANDIDATE→CONFIRMED transition
