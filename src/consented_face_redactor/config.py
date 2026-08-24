@@ -49,3 +49,18 @@ class Config:
             if key in d:
                 mapping[key] = d[key]
         return cls(**mapping)
+
+    @classmethod
+    def default(cls) -> Config:
+        """Return a Config instance with all default values."""
+        return cls()
+
+    def to_dict(self) -> dict[str, object]:
+        """Return all config attributes as a plain dictionary."""
+        return {
+            "effect_mode": self.effect_mode,
+            "t_confirm": self.t_confirm,
+            "t_keep": self.t_keep,
+            "track_lost_ttl_frames": self.track_lost_ttl_frames,
+            "recheck_interval_frames": self.recheck_interval_frames,
+        }

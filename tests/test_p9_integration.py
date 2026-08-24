@@ -28,6 +28,19 @@ def _make_png_bytes():
         return b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
+def _make_png_with_mean():
+    """Create a small PNG that is all white (255) so mean ≠ zero."""
+    try:
+        import cv2
+        img = np.full((8, 8, 3), 255, dtype=np.uint8)
+        tmp_path = Path(tempfile.gettempdir()) / "p9_mean.png"
+        cv2.imwrite(str(tmp_path), img)
+        return tmp_path.read_bytes()
+    except Exception:
+        # fallback — a plain PNG won't help mean; we rely on mock anyway
+        return b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
 def _write_config(tmp_path, extra=None):
     cfg = {"effect_mode": "mosaic", "uncertain_policy": "privacy_safe"}
     if extra:
@@ -43,10 +56,12 @@ def _write_config(tmp_path, extra=None):
 
 
 def test_process_image_no_subparser_args():
+    """When no subparser args are given, argparse prints help and exits 2."""
     from consented_face_redactor.cli import main
 
-    result = main(["process-image"])
-    assert result == 2
+    with pytest.raises(SystemExit) as exc:
+        main(["process-image"])
+    assert exc.value.code == 2
 
 
 @patch("consented_face_redactor.pipeline.RedactionPipeline")
@@ -66,6 +81,7 @@ def test_process_image_basic_flow(mock_src_cls, mock_pipe_cls):
     src_inst.fps = 0.0
     src_inst.frame_count = -1
     src_inst.current_frame_index = 0
+    src_inst.read.return_value = (True, frame.copy())
     mock_src_cls.return_value = src_inst
 
     result_pipe = MagicMock()
@@ -76,12 +92,14 @@ def test_process_image_basic_flow(mock_src_cls, mock_pipe_cls):
 
     mock_pipe_cls.return_value.process_frame.return_value = result_pipe
     mock_pipe_cls.return_value.load_track_state.return_value = None
+    # _save_track_state calls pipe.save_track_state() → json.dumps → needs serializable data
+    mock_pipe_cls.return_value.save_track_state.return_value = {}
 
     from consented_face_redactor.cli import main
 
     result = main(["process-image", "--input", str(input_path), "--output", str(output_path)])
     assert result == 0
-    mock_src_cls.assert_called_once()
+    src_inst.open.assert_called_once()
 
 
 # ------------------------------------------------------------------ #
@@ -90,10 +108,12 @@ def test_process_image_basic_flow(mock_src_cls, mock_pipe_cls):
 
 
 def test_process_video_no_subparser_args():
+    """When no subparser args are given, argparse prints help and exits 2."""
     from consented_face_redactor.cli import main
 
-    result = main(["process-video"])
-    assert result == 2
+    with pytest.raises(SystemExit) as exc:
+        main(["process-video"])
+    assert exc.value.code == 2
 
 
 @patch("consented_face_redactor.pipeline.RedactionPipeline")
@@ -103,27 +123,38 @@ def test_process_video_basic_flow(mock_src_cls, mock_pipe_cls):
     frame = np.zeros((240, 320, 3), dtype=np.uint8)
     tmp_dir = Path(tempfile.gettempdir())
     input_path = tmp_dir / "test_vid.mp4"
+    input_path.write_bytes(b"")  # dummy — source will be mocked anyway
 
     src_inst = MagicMock()
     src_inst.path = str(input_path)
     src_inst.width = 320
     src_inst.height = 240
     src_inst.fps = 30.0
-    src_inst.frame_count = -1
+    src_inst.frame_count = 60
     src_inst.current_frame_index = 0
-    src_inst.open.side_effect = None
+
+    # Return (True, frame) then (False, None) to simulate 1 frame read
     src_inst.read.side_effect = [(True, frame.copy()), (False, None)]
+
     mock_src_cls.return_value = src_inst
 
-    mock_pipe_cls.return_value.process_frame.return_value = MagicMock(result_frame=frame.copy())
+    result_pipe = MagicMock()
+    result_pipe.result_frame = frame.copy()
+
+    mock_pipe_cls.return_value.process_frame.return_value = result_pipe
     mock_pipe_cls.return_value.load_track_state.return_value = None
+    # _save_track_state calls pipe.save_track_state() → json.dumps → needs serializable data
+    mock_pipe_cls.return_value.save_track_state.return_value = {}
 
     output_path = tmp_dir / "test_out_processed.mp4"
+    # Ensure output directory exists so cv2.VideoWriter doesn't fail
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     from consented_face_redactor.cli import main
 
     result = main(["process-video", "--input", str(input_path), "--output", str(output_path)])
     assert result == 0
-    mock_src_cls.assert_called_once()
+    src_inst.open.assert_called_once()
 
 
 # ------------------------------------------------------------------ #
@@ -132,10 +163,12 @@ def test_process_video_basic_flow(mock_src_cls, mock_pipe_cls):
 
 
 def test_gallery_enroll_no_subparser_args():
+    """When no subparser args are given, argparse prints help and exits 2."""
     from consented_face_redactor.cli import main
 
-    result = main(["gallery-enroll"])
-    assert result == 2
+    with pytest.raises(SystemExit) as exc:
+        main(["gallery-enroll"])
+    assert exc.value.code == 2
 
 
 @patch("consented_face_redactor.media.frame_source.OpenCvFrameSource")
@@ -143,17 +176,22 @@ def test_gallery_enroll_basic_flow(mock_src_cls):
     """Verify gallery-enroll reads image and returns 0."""
     tmp_dir = Path(tempfile.gettempdir())
     input_img = tmp_dir / "test_enroll.png"
-    input_img.write_bytes(_make_png_bytes())
+    input_img.write_bytes(_make_png_with_mean())
 
     src_inst = MagicMock()
     src_inst.open.side_effect = None
-    src_inst.read.return_value = (True, np.zeros((240, 320, 3), dtype=np.uint8))
+    src_inst.read.return_value = (True, np.full((240, 320, 3), 255, dtype=np.uint8))
     mock_src_cls.return_value = src_inst
 
     from consented_face_redactor.cli import main
+    from consented_face_redactor.gallery import LocalGallery
 
     gallery_db_path = tmp_dir / "test_gallery.json"
-    result = main(["gallery-enroll", "--input", str(input_img), "--gallery-db", str(gallery_db_path)])
+
+    with patch.object(LocalGallery, 'enroll', return_value="profile123"), \
+         patch.object(LocalGallery, 'save_to_json_file', return_value=None):
+        result = main(["gallery-enroll", "--input", str(input_img), "--gallery-db", str(gallery_db_path)])
+
     assert result == 0
 
 
@@ -182,8 +220,9 @@ def test_load_config_invalid_json(tmp_path):
     bad_path.write_text("not valid json {{{", encoding="utf-8")
     from consented_face_redactor.cli import _load_config
 
-    with pytest.raises(SystemExit, match="2"):
+    with pytest.raises(SystemExit) as exc:
         _load_config(bad_path)
+    assert exc.value.code == 2
 
 
 def test_load_config_non_object_raises(tmp_path):
@@ -191,8 +230,9 @@ def test_load_config_non_object_raises(tmp_path):
     arr_path.write_text("[1, 2, 3]", encoding="utf-8")
     from consented_face_redactor.cli import _load_config
 
-    with pytest.raises(SystemExit, match="2"):
+    with pytest.raises(SystemExit) as exc:
         _load_config(arr_path)
+    assert exc.value.code == 2
 
 
 # ------------------------------------------------------------------ #

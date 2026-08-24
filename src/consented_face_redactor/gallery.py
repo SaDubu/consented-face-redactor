@@ -510,3 +510,34 @@ class LocalGallery:
     @property
     def embedding_dimension(self) -> int | None:
         return self._embedding_dimension
+
+    def save_to_json_file(self, path: str | Path) -> None:
+        """Write the gallery to a JSON file at *path*."""
+        import os
+        import tempfile
+
+        target = Path(path).expanduser().resolve(strict=False)
+        if not target.parent.is_dir():
+            raise LocalGalleryError("Gallery directory is unavailable")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=f".{target.name}.tmp_",
+            suffix=".json",
+            delete=False,
+        ) as handle:
+            json.dump(self.to_dict(), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        target.replace(Path(handle.name))
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> "LocalGallery":
+        """Load and validate a gallery JSON file and return an instance."""
+        source = Path(path).expanduser().resolve(strict=False)
+        text = source.read_text(encoding="utf-8")
+        raw = json.loads(text)
+        return cls.from_dict(raw)
