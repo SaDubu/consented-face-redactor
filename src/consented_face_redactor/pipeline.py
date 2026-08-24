@@ -60,6 +60,86 @@ class ProcessResult(NamedTuple):
 
 
 # ------------------------------------------------------------------ #
+# Effect / domain imports (Phase 8) — wired at import time for lazy access
+# ------------------------------------------------------------------ #
+
+def _import_effects():
+    """Lazily fetch StickerEffect, MosaicConfig, FaceBox."""
+    from consented_face_redactor.effects.sticker import StickerEffect
+    from consented_face_redactor.domain.types import MosaicConfig, FaceBox
+    return StickerEffect, MosaicConfig, FaceBox
+
+
+def _build_sticker_effect(config, scale_factor, anchor):
+    """Create a StickerEffect instance using config attr look-ups."""
+    StickerEffect = _import_effects()[0]
+    png_bytes = getattr(config, "sticker_png_bytes") or b""
+    return StickerEffect(
+        png_bytes, scale_factor=scale_factor, anchor=anchor, eye_rotation=True
+    )
+
+
+def _apply_effect_to_bbox(frame, bbox, mode, config, effect_proxy):
+    """Apply mosaic / sticker / none effect to *frame* using the confirmed bbox.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        RGB uint8 (H,W,3) — never mutated; copy is returned.
+    bbox : tuple[float,float,float,float]
+        Face bounding box (x1,y1,x2,y2) in pixel coords.
+    mode : str
+        Effect mode: ``'mosaic'``, ``'sticker'``, or ``'none'``.
+    config : Config
+        Pipeline config for attribute look-ups (sticker_* etc.).
+    effect_proxy : StickerEffect | None
+        Pre-built sticker instance (used when proxy is available).
+
+    Returns
+    -------
+    np.ndarray
+        New frame with the selected redaction applied to the bbox ROI.
+    """
+    MosaicConfig, FaceBox = _import_effects()[1:]
+
+    x1 = max(int(bbox[0]), 0)
+    y1 = max(int(bbox[1]), 0)
+    x2 = min(int(bbox[2]), frame.shape[1])
+    y2 = min(int(bbox[3]), frame.shape[0])
+
+    if x2 <= x1 or y2 <= y1:
+        return frame.copy()
+
+    face_roi = FaceBox(x1, y1, x2, y2)
+
+    # --- MOSAIC --------------------------------------------------------- #
+    if mode == "mosaic":
+        mosaic_cfg = MosaicConfig(force_block_size=8)
+        from consented_face_redactor.effects.mosaic import MosaicEffect
+        mosaic_inst = MosaicEffect(mosaic_cfg)
+        return mosaic_inst.render(frame, face_roi)
+
+    # --- STICKER -------------------------------------------------------- #
+    if mode == "sticker":
+        StickerEffect = _import_effects()[0]
+        five_landmarks = getattr(config, "effect_five_landmarks", None)
+        if effect_proxy is not None:
+            return effect_proxy.render(frame, face_roi, five_landmarks or type("LM", (), {"eye_angle": 0.0})())
+        else:
+            sf = float(getattr(config, "sticker_scale_factor", 1.0))
+            anc = str(getattr(config, "sticker_anchor", "center"))
+            sticker = _build_sticker_effect(config, sf, anc)
+            return sticker.render(frame, face_roi, five_landmarks or type("LM", (), {"eye_angle": 0.0})())
+
+    # --- NONE ------------------------------------------------------------ #
+    if mode == "none":
+        return frame.copy()
+
+    # unknown mode — same as none (no effect applied)
+    return frame.copy()
+
+
+# ------------------------------------------------------------------ #
 # Pipeline class (placeholder -- no real model integration yet)
 # ------------------------------------------------------------------ #
 
@@ -301,6 +381,17 @@ class RedactionPipeline:
                 new_state = TrackState.CONFIRMED
                 is_redacted = True
                 review_required = False
+                # Wire Phase 8: apply effect to the detected face bbox on first CONFIRMED entry
+                if detections.bboxes:
+                    out_frame_accumulator = frame.copy()
+                    for one_bbox in detections.bboxes:
+                        out_frame_accumulator = _apply_effect_to_bbox(
+                            out_frame_accumulator,
+                            one_bbox,
+                            self._config.effect_mode,
+                            self._config,
+                            None,  # no pre-built sticker proxy needed here
+                        )
             else:
                 new_state = TrackState.CANDIDATE
 
@@ -347,6 +438,17 @@ class RedactionPipeline:
                     self._confirmed_profile_id = float(matches[0][1])  # score as profile proxy
                 else:
                     self._confirmed_profile_id = None
+                # Wire Phase 8: apply effect to detected faces on CANDIDATE→CONFIRMED transition
+                if detections.bboxes:
+                    out_frame_accumulator = frame.copy()
+                    for one_bbox in detections.bboxes:
+                        out_frame_accumulator = _apply_effect_to_bbox(
+                            out_frame_accumulator,
+                            one_bbox,
+                            self._config.effect_mode,
+                            self._config,
+                            None,  # no pre-built sticker proxy needed here
+                        )
 
         elif self._track_state == TrackState.CONFIRMED:
             # Face still present while confirmed — keep redacting
@@ -354,6 +456,16 @@ class RedactionPipeline:
                 is_redacted = True
                 review_required = False
                 new_state = TrackState.CONFIRMED
+                # Wire Phase 8: apply effect to each detected face bbox
+                out_frame_accumulator = frame.copy()
+                for one_bbox in detections.bboxes:
+                    out_frame_accumulator = _apply_effect_to_bbox(
+                        out_frame_accumulator,
+                        one_bbox,
+                        self._config.effect_mode,
+                        self._config,
+                        None,  # no pre-built sticker proxy needed here
+                    )
             else:
                 review_required = True
 
@@ -368,8 +480,27 @@ class RedactionPipeline:
         self._frame_index = frame_index
         self._track_state = new_state
 
+        # Phase 8: wire effect results back into the ProcessResult frame
+        out_frame = None
+        if self._track_state == TrackState.CONFIRMED and detections.bboxes:
+            if 'out_frame_accumulator' in dir():
+                out_frame = out_frame_accumulator
+            else:
+                out_frame = frame.copy()
+        elif is_redacted and detections.bboxes:
+            # First-time CONFIRMED (UNSEEN→CONFIRMED or CANDIDATE→CONFIRMED) — result accumulated above
+            if 'out_frame_accumulator' in dir():
+                out_frame = out_frame_accumulator
+            else:
+                out_frame = frame.copy()
+        else:
+            # no redaction, no detection — return unmodified frame
+            out_frame = frame.copy()
+
+        assert out_frame is not None, "Phase 8: out_frame must always be set"
+
         return ProcessResult(
-            result_frame=frame.copy(),
+            result_frame=out_frame,
             is_redacted=is_redacted,
             track_state=new_state,
             review_required=review_required,
