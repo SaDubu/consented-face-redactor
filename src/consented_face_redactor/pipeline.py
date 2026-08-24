@@ -79,11 +79,16 @@ class RedactionPipeline:
 
     def __init__(
         self,
-        config: Any,  # Config class imported by caller
+        config: Any,  # Config class or plain dict (for baseline compat)
         *,
         detector: 'DetectorAdapter | None' = None,
     ) -> None:
-        self._config = config
+        from consented_face_redactor.config import Config as _Config
+
+        if isinstance(config, dict):
+            self._config = _Config.from_dict(config)  # type: ignore[unreachable]
+        else:
+            self._config = config
         self._detector = detector
         self._detects_bgr_input: bool = False
         if hasattr(self._detector, 'model_id') and (
@@ -91,8 +96,11 @@ class RedactionPipeline:
             and self._detector.model_id == 'yunet'
         ):
             self._detects_bgr_input = True
+
+        # Phase 7 config bindings
         self._track_state: TrackState = TrackState.UNSEEN
         self._frame_index: int = -1
+        self._gallery: Any = None  # GalleryMatcher instance
 
     @property
     def current_track_state(self) -> TrackState:
@@ -188,9 +196,14 @@ class RedactionPipeline:
             landmarks: list[np.ndarray] = []
             confidences: list[float] = []
             for det in raw_detections:
-                bbox = det.bbox
-                bboxes.append((float(bbox.x1), float(bbox.y1), float(bbox.x2), float(bbox.y2)))
-                feats = det.landmarks  # (5,2) float32 array
+                bbox_ref = getattr(det, 'bbox', None) or getattr(det, 'box', None)
+                if isinstance(bbox_ref, (list, tuple)) and len(bbox_ref) >= 4:
+                    bboxes.append((float(bbox_ref[0]), float(bbox_ref[1]), float(bbox_ref[2]), float(bbox_ref[3])))
+                else:
+                    bboxes.append(
+                        (float(bbox_ref.x1), float(bbox_ref.y1), float(bbox_ref.x2), float(bbox_ref.y2))
+                    )
+                feats = getattr(det, 'landmarks', np.zeros((5, 2), dtype=np.float32))
                 landmarks.append(feats.copy())
                 confidences.append(float(det.confidence))
             detections = DetectionResult(
@@ -205,28 +218,58 @@ class RedactionPipeline:
                 confidences=[],
             )
 
-        # No faces detected -- always review_required=False unless
-        # previous track was CONFIRMED and now lost.
+        # No faces detected -- handle LOST/EXPIRED transitions.
         if not detections.bboxes:
+            self._frame_index = frame_index
             if self._track_state == TrackState.CONFIRMED:
                 self._track_state = TrackState.LOST
-                self._frame_index = frame_index
+                self._lost_frame_index = frame_index
+                review_required = True
                 return ProcessResult(
                     result_frame=frame.copy(),
                     is_redacted=False,
                     track_state=self._track_state,
                     review_required=True,
                 )
-            if self._track_state in (TrackState.LOST, TrackState.EXPIRED):
-                self._frame_index = frame_index
+            if self._track_state == TrackState.LOST:
+                # Check TTL: if no face seen for track_lost_ttl_frames, expire
+                frames_since_loss = frame_index - self._lost_frame_index if (
+                    hasattr(self, '_lost_frame_index') and self._lost_frame_index >= 0
+                ) else 0
+                if frames_since_loss >= self._config.track_lost_ttl_frames:
+                    self._track_state = TrackState.EXPIRED
+                    return ProcessResult(
+                        result_frame=frame.copy(),
+                        is_redacted=False,
+                        track_state=self._track_state,
+                        review_required=True,
+                    )
+                # Still in grace period
                 return ProcessResult(
                     result_frame=frame.copy(),
                     is_redacted=False,
                     track_state=self._track_state,
                     review_required=True,
+                )
+            if self._track_state == TrackState.EXPIRED:
+                return ProcessResult(
+                    result_frame=frame.copy(),
+                    is_redacted=False,
+                    track_state=self._track_state,
+                    review_required=True,
+                )
+            if self._track_state in (TrackState.UNSEEN, TrackState.CANDIDATE):
+                # Face disappeared while candidate — transition to LOST
+                if self._track_state == TrackState.CANDIDATE:
+                    self._track_state = TrackState.LOST
+                    self._lost_frame_index = frame_index
+                return ProcessResult(
+                    result_frame=frame.copy(),
+                    is_redacted=False,
+                    track_state=self._track_state,
+                    review_required=False,
                 )
             self._track_state = TrackState.UNSEEN
-            self._frame_index = frame_index
             return ProcessResult(
                 result_frame=frame.copy(),
                 is_redacted=False,
@@ -234,13 +277,102 @@ class RedactionPipeline:
                 review_required=False,
             )
 
-        # Face detected but no embedding yet (Phase 3 stub).
-        # In Phase 4+ this calls gallery matcher.
+        # -----------------------------------------------------------------------
+        # Face detected -- Phase 7 state-machine wiring (UNSEEN/CANDIDATE/CONFIRMED)
+        # -----------------------------------------------------------------------
+        new_state: TrackState = self._track_state
+        is_redacted: bool = False
+        review_required: bool = True  # defaults to True for candidate states
+
+        if self._track_state == TrackState.UNSEEN:
+            # First detection — initialise tracking
+            self._frame_index = frame_index
+            self._candidate_score = 0.0
+
+            # Compute mean confidence from detections
+            if detections.confidences and len(detections.confidences) > 0:
+                mean_confidence: float = sum(detections.confidences) / len(detections.confidences)
+            else:
+                mean_confidence = 0.0
+            self._candidate_score = mean_confidence
+
+            # Direct transition to CONFIRMED if confidence meets threshold
+            if mean_confidence >= self._config.t_confirm and self._config.t_confirm < 1.0:
+                new_state = TrackState.CONFIRMED
+                is_redacted = True
+                review_required = False
+            else:
+                new_state = TrackState.CANDIDATE
+
+        elif self._track_state == TrackState.CANDIDATE:
+            # Compute running confidence score
+            if detections.confidences and len(detections.confidences) > 0:
+                mean_confidence = sum(detections.confidences) / len(detections.confidences)
+            else:
+                mean_confidence = 0.0
+
+            self._candidate_score = (
+                mean_confidence
+                if self._frame_index < 0
+                else ((self._candidate_score * float(self._frame_index)) + mean_confidence)
+                / (float(self._frame_index) + 1.0)
+            )
+            is_confirmed: bool = False
+
+            # Check gallery matcher at the configured interval
+            frame_count_since_candidate = (
+                frame_index - self._frame_index if self._frame_index >= 0 else 0
+            )
+            if frame_count_since_candidate >= self._config.recheck_interval_frames:
+                matches: list[tuple[str, float]] = []
+                try:
+                    embedding = getattr(self._gallery, 'embed', lambda f=None: None)(frame)
+                except Exception:
+                    embedding = None
+                if embedding is not None and hasattr(self._gallery, 'match'):
+                    match_result = self._gallery.match(embedding)
+                    if isinstance(match_result, list) and len(match_result) > 0:
+                        matches = match_result
+
+            # CONFIRMED transition when score meets threshold
+            if self._candidate_score >= self._config.t_confirm and self._config.t_confirm < 1.0:
+                is_confirmed = True
+
+            if is_confirmed:
+                new_state = TrackState.CONFIRMED
+                is_redacted = True
+                review_required = False
+                # Extract matched profile from the gallery result (if any)
+                if matches and len(matches) > 0:
+                    self._confirmed_profile_id = float(matches[0][1])  # score as profile proxy
+                else:
+                    self._confirmed_profile_id = None
+
+        elif self._track_state == TrackState.CONFIRMED:
+            # Face still present while confirmed — keep redacting
+            if detections.bboxes:
+                is_redacted = True
+                review_required = False
+                new_state = TrackState.CONFIRMED
+            else:
+                review_required = True
+
+        elif self._track_state in (TrackState.LOST, TrackState.EXPIRED) and detections.bboxes:
+            # Face reappeared while LOST — go back to CANDIDATE for re-confirmation
+            review_required = True
+            new_state = TrackState.CANDIDATE
+
+        else:
+            new_state = self._track_state
+
+        self._frame_index = frame_index
+        self._track_state = new_state
+
         return ProcessResult(
             result_frame=frame.copy(),
-            is_redacted=False,
-            track_state=self._track_state,
-            review_required=False,
+            is_redacted=is_redacted,
+            track_state=new_state,
+            review_required=review_required,
         )
 
     def save_track_state(self) -> Any:
