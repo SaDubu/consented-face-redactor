@@ -40,6 +40,13 @@ class TestValidateManifest:
         assert result["provider"] == "OpenCV"
         assert result["sha256"] == "a" * 64
 
+    def test_accepts_pytorch_tracker_provider(self):
+        result = validate_manifest(
+            _make_entry(role="tracker", provider="pytorch", filename="tracker.ckpt")
+        )
+        assert result["provider"] == "PyTorch"
+        assert result["role"] == "tracker"
+
     @pytest.mark.parametrize("role", ["invalid", "DETECTOR ", 123, None, ""])
     def test_rejects_invalid_role(self, role):
         with pytest.raises(ManifestValidationError):

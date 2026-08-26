@@ -9,11 +9,9 @@ Tests cover:
 
 from __future__ import annotations
 
-from io import BytesIO
-
+import cv2
 import numpy as np
 import pytest
-from PIL import Image
 
 from consented_face_redactor.domain.types import FaceBox, FiveLandmarks, MosaicConfig
 from consented_face_redactor.effects import MosaicEffect, StickerEffect
@@ -30,11 +28,11 @@ from consented_face_redactor.pipeline import (
 
 
 def _make_png(width: int = 16, height: int = 16, r: int = 255, g: int = 0, b: int = 0, a: int = 255) -> bytes:
-    """Return valid PNG bytes with uniform RGBA colour (using Pillow)."""
-    img = Image.new("RGBA", (width, height), (r, g, b, a))
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    """Return valid PNG bytes with uniform RGBA colour."""
+    image = np.full((height, width, 4), (r, g, b, a), dtype=np.uint8)
+    encoded, png = cv2.imencode(".png", image)
+    assert encoded
+    return png.tobytes()
 
 
 def _make_pipeline(*, effect_mode: str = "mosaic", sticker_png_bytes: bytes | None = None, **extra) -> RedactionPipeline:

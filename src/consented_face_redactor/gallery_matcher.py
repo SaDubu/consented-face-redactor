@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from consented_face_redactor.gallery_approval import GalleryApproval
+
 
 class GalleryMatcher:
     """Match extracted embeddings against a gallery of known profiles.
@@ -28,27 +30,25 @@ class GalleryMatcher:
         """
         return None  # stub — no embeddings produced without a model backend
 
-    def match(self, embedding: list[float] | None) -> list[tuple[str, float]] | None:
+    def match(self, embedding: list[float] | None) -> GalleryApproval:
         """Match *embedding* against the gallery.
 
         Returns
         -------
-        list[tuple[str, float]] | None
-            A sequence of ``(profile_id, cosine_similarity)`` tuples sorted by
-            similarity descending when an embedding is provided and matches exist;
-            ``None`` otherwise.
+        GalleryApproval
+            One explicit approved or denied decision. The pipeline never infers
+            authority from the similarity field itself.
         """
         if embedding is None:
-            return None
+            return GalleryApproval.denied("embedding_unavailable", gallery_revision="stub-v1")
 
         if not self._gallery_db:
-            return []
+            return GalleryApproval.denied("empty_gallery", gallery_revision="stub-v1")
 
         # Stub matching — in a real implementation this would compute cosine
         # similarity against every gallery profile and return the top N.
-        results: list[tuple[str, float]] = []
-        for profile_id, vec in self._gallery_db.items():
-            results.append((profile_id, 0.0))  # stub similarity score
-
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results
+        return GalleryApproval.denied(
+            "similarity_not_evaluated",
+            similarity=0.0,
+            gallery_revision="stub-v1",
+        )

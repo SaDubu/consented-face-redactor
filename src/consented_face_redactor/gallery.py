@@ -8,7 +8,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -59,6 +59,15 @@ class MatchResult:
     def is_match(self) -> bool:
         """Only the calibrated high category is a positive identity match."""
         return self.score_category == "high"
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileSimilarity:
+    """Non-authorizing diagnostic details for one profile comparison."""
+
+    best_similarity: float
+    best_reference_index: int | None
+    centroid_similarity: float
 
 
 @dataclass(frozen=True)
@@ -189,10 +198,30 @@ class LocalGallery:
     def _profile_vectors(data: dict[str, Any]) -> list[np.ndarray]:
         return [np.asarray(vector, dtype=np.float32) for vector in data["vectors"]]
 
+    def _profile_similarity_details(
+        self, vector: np.ndarray, data: dict[str, Any]
+    ) -> ProfileSimilarity:
+        """Return best reference and centroid scores without making a decision."""
+        references = self._profile_vectors(data)
+        reference_scores = [_cosine_similarity(vector, item) for item in references]
+        best_reference_index = int(np.argmax(reference_scores)) if reference_scores else None
+        best_reference_score = (
+            reference_scores[best_reference_index]
+            if best_reference_index is not None
+            else -1.0
+        )
+        centroid_score = _cosine_similarity(
+            vector, np.asarray(data["centroid"], dtype=np.float32)
+        )
+        return ProfileSimilarity(
+            best_similarity=max(best_reference_score, centroid_score),
+            best_reference_index=best_reference_index,
+            centroid_similarity=centroid_score,
+        )
+
     def _profile_similarity(self, vector: np.ndarray, data: dict[str, Any]) -> float:
-        candidates = self._profile_vectors(data)
-        candidates.append(np.asarray(data["centroid"], dtype=np.float32))
-        return max(_cosine_similarity(vector, candidate) for candidate in candidates)
+        """Compatibility wrapper for callers needing only the best score."""
+        return self._profile_similarity_details(vector, data).best_similarity
 
     def enroll(
         self,
@@ -244,6 +273,46 @@ class LocalGallery:
     def add_reference(self, profile_id: str, embedding: np.ndarray) -> str:
         """Append a distinct reference vector to an existing opaque profile."""
         return self.enroll(embedding, profile_id=profile_id)
+
+    def enroll_many(
+        self,
+        embeddings: Sequence[np.ndarray],
+        *,
+        profile_id: str | None = None,
+    ) -> str:
+        """Atomically create or extend a profile with multiple references.
+
+        Every vector is first checked against a detached staging gallery. A
+        malformed or colliding vector therefore leaves this instance unchanged.
+        """
+        if not isinstance(embeddings, Sequence) or not embeddings:
+            raise EnrollmentValidationError("empty_batch")
+        staged = self.from_dict(self.to_dict())
+        active_profile_id = profile_id
+        for embedding in embeddings:
+            active_profile_id = staged.enroll(embedding, profile_id=active_profile_id)
+        self._high_threshold = staged._high_threshold
+        self._medium_threshold = staged._medium_threshold
+        self._profile_collision_threshold = staged._profile_collision_threshold
+        self._duplicate_vector_threshold = staged._duplicate_vector_threshold
+        self._profiles = staged._profiles
+        self._next_profile_counter = staged._next_profile_counter
+        self._embedding_dimension = staged._embedding_dimension
+        assert active_profile_id is not None
+        return active_profile_id
+
+    def profile_similarity_details(
+        self, query_embedding: np.ndarray, profile_id: str
+    ) -> ProfileSimilarity:
+        """Return diagnostics for one existing profile after normalizing query."""
+        if not isinstance(profile_id, str) or profile_id not in self._profiles:
+            raise ValueError("Unknown profile ID")
+        try:
+            query = self._normalize_enrollment(query_embedding)
+        except EnrollmentValidationError as exc:
+            raise ValueError(f"Invalid query embedding: {exc.reason}") from exc
+        self._assert_dimension(query, enrollment=False)
+        return self._profile_similarity_details(query, self._profiles[profile_id])
 
     def match(
         self,

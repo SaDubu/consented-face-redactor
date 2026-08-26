@@ -138,4 +138,3 @@ class FakeFrameReader(FrameSource):
             return False
         self._current_index = frame_index
         return True
-

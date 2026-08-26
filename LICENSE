@@ -1,0 +1,57 @@
+PORTFOLIO VIEWING LICENSE 1.0
+
+Copyright (c) 2026 Project Owner. All rights reserved.
+
+1. Purpose
+
+This repository is published solely as a public portfolio demonstrating the
+Project Owner's software engineering, computer vision, testing, and technical
+documentation work.
+
+2. Permission granted
+
+You may:
+
+- view the repository through its public hosting page;
+- create a temporary or local copy solely to evaluate the portfolio;
+- link to the public repository; and
+- quote short excerpts for review, recruitment, or academic commentary when
+  the repository and Project Owner are clearly attributed.
+
+3. Rights not granted
+
+No permission is granted to use the source code or documentation as a software
+product or service. Without prior written permission from the Project Owner,
+you may not:
+
+- reproduce or redistribute a substantial part of this repository;
+- modify, publish, sublicense, sell, or commercially exploit the work;
+- create or distribute derivative software based on the work;
+- deploy the code for biometric identification, surveillance, or production
+  processing;
+- use the repository, its documentation, or derived artifacts as a training
+  dataset for a model; or
+- remove or alter this notice.
+
+Public visibility and technical ability to clone or fork the repository do not
+grant rights beyond this license.
+
+4. Third-party materials
+
+Third-party libraries, model architectures, model weights, and external source
+code remain subject to their respective licenses. Model weights, biometric
+media, face embeddings, galleries, and generated result videos are not licensed
+or distributed by this repository.
+
+5. No warranty
+
+THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, ACCURACY, NON-INFRINGEMENT, OR FITNESS FOR BIOMETRIC OR
+PRIVACY-SENSITIVE USE. IN NO EVENT SHALL THE PROJECT OWNER BE LIABLE FOR ANY
+CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE WORK OR ITS USE.
+
+6. Additional permission
+
+Any use outside the portfolio-viewing scope requires prior written permission
+from the Project Owner.

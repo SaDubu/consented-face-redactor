@@ -39,7 +39,11 @@ REQUIRED_KEYS = [
 ]
 
 VALID_ROLES = {"detector", "embedder", "tracker", "renderer"}
-VALID_PROVIDERS = {"opencv": "OpenCV", "onnxruntime": "ONNXRuntime"}
+VALID_PROVIDERS = {
+    "opencv": "OpenCV",
+    "onnxruntime": "ONNXRuntime",
+    "pytorch": "PyTorch",
+}
 
 
 class ManifestValidationError(Exception):

@@ -9,11 +9,13 @@ The input frame is never mutated by default; all operations return new objects.
 
 from __future__ import annotations
 
-from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
+
+from consented_face_redactor.gallery_approval import GalleryApproval
 
 
 # ------------------------------------------------------------------ #
@@ -57,6 +59,14 @@ class ProcessResult(NamedTuple):
     is_redacted: bool          # True only when identity is confirmed
     track_state: TrackState    # current track state after this frame
     review_required: bool      # True if frame range needs manual review
+
+
+@dataclass(frozen=True, slots=True)
+class FaceDecision:
+    """One detection's bbox and explicit approval result for diagnostics."""
+
+    bbox: tuple[float, float, float, float]
+    approval: GalleryApproval
 
 
 # ------------------------------------------------------------------ #
@@ -114,8 +124,27 @@ def _apply_effect_to_bbox(frame, bbox, mode, config, effect_proxy):
 
     # --- MOSAIC --------------------------------------------------------- #
     if mode == "mosaic":
-        mosaic_cfg = MosaicConfig(force_block_size=8)
-        from consented_face_redactor.effects.mosaic import MosaicEffect
+        mosaic_cfg = MosaicConfig(
+            grid_cells=int(getattr(config, "mosaic_grid_cells", 12)),
+            padding_ratio=float(getattr(config, "mosaic_padding_ratio", 0.18)),
+            min_block_px=int(getattr(config, "mosaic_min_block_px", 10)),
+            shape=str(getattr(config, "mosaic_shape", "ellipse")),
+            ellipse_horizontal_scale=float(
+                getattr(config, "mosaic_ellipse_horizontal_scale", 1.40)
+            ),
+            ellipse_vertical_scale=float(
+                getattr(config, "mosaic_ellipse_vertical_scale", 1.50)
+            ),
+        )
+        from consented_face_redactor.effects.mosaic import MosaicEffect, expand_bbox
+
+        if mosaic_cfg.shape == "rectangle":
+            expanded = expand_bbox(
+                (x1, y1, x2, y2),
+                frame_shape=frame.shape,
+                padding_ratio=mosaic_cfg.padding_ratio,
+            )
+            face_roi = FaceBox(*expanded)
         mosaic_inst = MosaicEffect(mosaic_cfg)
         return mosaic_inst.render(frame, face_roi)
 
@@ -162,6 +191,7 @@ class RedactionPipeline:
         config: Any,  # Config class or plain dict (for baseline compat)
         *,
         detector: 'DetectorAdapter | None' = None,
+        gallery: Any | None = None,
     ) -> None:
         from consented_face_redactor.config import Config as _Config
 
@@ -180,7 +210,14 @@ class RedactionPipeline:
         # Phase 7 config bindings
         self._track_state: TrackState = TrackState.UNSEEN
         self._frame_index: int = -1
-        self._gallery: Any = None  # GalleryMatcher instance
+        self._gallery: Any = gallery  # GalleryMatcher instance
+        self._lost_frame_index: int | None = None
+        self._confirmed_profile_id: str | None = None
+        self._candidate_confidences: list[float] = []
+        self._gallery_recheck_count = 0
+        self._last_gallery_approval = GalleryApproval.denied("not_checked")
+        self._last_frame_approvals: tuple[GalleryApproval, ...] = ()
+        self._last_frame_decisions: tuple[FaceDecision, ...] = ()
 
     @property
     def current_track_state(self) -> TrackState:
@@ -195,6 +232,31 @@ class RedactionPipeline:
     def has_detector(self) -> bool:
         """Return True when a detector was provided to the pipeline."""
         return self._detector is not None
+
+    @property
+    def last_gallery_approval(self) -> GalleryApproval:
+        """Return the latest structured gallery decision without granting authority."""
+        return self._last_gallery_approval
+
+    @property
+    def last_frame_approvals(self) -> tuple[GalleryApproval, ...]:
+        """Return the face-by-face decisions made for the latest frame."""
+        return self._last_frame_approvals
+
+    @property
+    def last_frame_decisions(self) -> tuple[FaceDecision, ...]:
+        """Return face-local decisions; callers must opt in before persisting bboxes."""
+        return self._last_frame_decisions
+
+    @property
+    def telemetry_snapshot(self) -> dict[str, Any]:
+        """Return non-authorizing observation metrics for benchmarks and diagnostics."""
+        return {
+            "candidate_confidences": tuple(self._candidate_confidences),
+            "gallery_recheck_count": self._gallery_recheck_count,
+            "approval_reason": self._last_gallery_approval.reason_code,
+            "gallery_revision": self._last_gallery_approval.gallery_revision,
+        }
 
     # -- public detection bridge -------------------------------------- #
 
@@ -211,15 +273,63 @@ class RedactionPipeline:
         if self._detector is None:
             return []
 
-        input_frame = frame
-        if self._detects_bgr_input and frame.dtype == np.uint8 and frame.ndim == 3 and frame.shape[2] == 3:
-            # cvtColor to BGR -- this mirrors the existing adapter contract.
-            # We use the minimal helper that only imports when needed.
-            with suppress(ImportError):
-                import cv2 as _cv2bgr  # type: ignore[import-not-found, unused-ignore]
-                input_frame = _cv2bgr.cvtColor(frame, _cv2bgr.COLOR_BGR2RGB)
+        # FrameSource and OpenCvYuNetDetector both use BGR. Do not convert a
+        # BGR frame to RGB here: that would silently degrade real inference.
+        return list(self._detector.detect(frame))
 
-        return list(self._detector.detect(input_frame))
+    def _evaluate_detection(self, frame: np.ndarray, detection: Any) -> GalleryApproval:
+        """Evaluate one face with an adapter exposing ``evaluate(frame, detection)``."""
+        try:
+            decision = self._gallery.evaluate(frame, detection)
+        except Exception:
+            return GalleryApproval.denied("gallery_evaluation_error")
+        if not isinstance(decision, GalleryApproval):
+            return GalleryApproval.denied("malformed_approval")
+        return decision
+
+    def _process_face_by_face_approvals(
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        raw_detections: list[Any],
+        bboxes: list[tuple[float, float, float, float]],
+        confidences: list[float],
+    ) -> ProcessResult:
+        """Fail closed per face, applying effects only to explicitly approved ROIs."""
+        approvals = tuple(
+            self._evaluate_detection(frame, detection) for detection in raw_detections
+        )
+        self._last_frame_approvals = approvals
+        self._last_frame_decisions = tuple(
+            FaceDecision(bbox=bbox, approval=approval)
+            for bbox, approval in zip(bboxes, approvals)
+        )
+        self._gallery_recheck_count += len(approvals)
+        self._candidate_confidences.extend(float(value) for value in confidences)
+        self._last_gallery_approval = next(
+            (approval for approval in approvals if approval.approved is True),
+            approvals[0],
+        )
+        approved_bboxes = [
+            bbox for bbox, approval in zip(bboxes, approvals) if approval.approved is True
+        ]
+        self._frame_index = frame_index
+        if not approved_bboxes:
+            self._track_state = TrackState.CANDIDATE
+            self._confirmed_profile_id = None
+            return ProcessResult(frame.copy(), False, self._track_state, True)
+
+        output = frame.copy()
+        for bbox in approved_bboxes:
+            output = _apply_effect_to_bbox(
+                output, bbox, self._config.effect_mode, self._config, None
+            )
+        self._track_state = TrackState.CONFIRMED
+        self._confirmed_profile_id = self._last_gallery_approval.profile_id
+        # An unapproved face in the same frame is never redacted and remains a
+        # review item even though another face was explicitly approved.
+        review_required = any(approval.approved is not True for approval in approvals)
+        return ProcessResult(output, True, self._track_state, review_required)
 
     def process_frame(
         self,
@@ -298,8 +408,23 @@ class RedactionPipeline:
                 confidences=[],
             )
 
+        # Production gallery adapters evaluate every detected face with its
+        # own landmarks. This path prevents one approved face from authorizing
+        # redaction of other people in the same frame. Legacy test adapters
+        # retain the historical embed()/match() path below.
+        if raw_detections and callable(getattr(self._gallery, "evaluate", None)):
+            return self._process_face_by_face_approvals(
+                frame,
+                frame_index,
+                raw_detections,
+                detections.bboxes,
+                detections.confidences,
+            )
+
         # No faces detected -- handle LOST/EXPIRED transitions.
         if not detections.bboxes:
+            self._last_frame_approvals = ()
+            self._last_frame_decisions = ()
             self._frame_index = frame_index
             if self._track_state == TrackState.CONFIRMED:
                 self._track_state = TrackState.LOST
@@ -375,6 +500,7 @@ class RedactionPipeline:
             else:
                 mean_confidence = 0.0
             self._candidate_score = mean_confidence
+            self._candidate_confidences.append(mean_confidence)
 
             # Safety gate: detector confidence alone NEVER authorizes redaction.
             # Unseen → CANDIDATE always; gallery match in CANDIDANT branch is what
@@ -394,36 +520,46 @@ class RedactionPipeline:
                 else ((self._candidate_score * float(self._frame_index)) + mean_confidence)
                 / (float(self._frame_index) + 1.0)
             )
-            is_confirmed: bool = False
+            self._candidate_confidences.append(mean_confidence)
 
             # Check gallery matcher at the configured interval
             frame_count_since_candidate = (
                 frame_index - self._frame_index if self._frame_index >= 0 else 0
             )
-            matches: list[tuple[str, float]] = []  # default: no matches
+            approval = GalleryApproval.denied("recheck_not_due")
             if frame_count_since_candidate >= self._config.recheck_interval_frames:
-                try:
-                    embedding = getattr(self._gallery, 'embed', lambda f=None: None)(frame)
-                except Exception:
-                    embedding = None
-                if embedding is not None and hasattr(self._gallery, 'match'):
-                    match_result = self._gallery.match(embedding)
-                    if isinstance(match_result, list) and len(match_result) > 0:
-                        matches = match_result
+                self._gallery_recheck_count += 1
+                if self._gallery is None:
+                    approval = GalleryApproval.denied("gallery_unavailable")
+                else:
+                    try:
+                        embedding = self._gallery.embed(frame)
+                    except Exception:
+                        approval = GalleryApproval.denied("embedding_error")
+                    else:
+                        if embedding is None:
+                            approval = GalleryApproval.denied("embedding_unavailable")
+                        else:
+                            try:
+                                candidate_approval = self._gallery.match(embedding)
+                            except Exception:
+                                approval = GalleryApproval.denied("gallery_match_error")
+                            else:
+                                if isinstance(candidate_approval, GalleryApproval):
+                                    approval = candidate_approval
+                                else:
+                                    approval = GalleryApproval.denied("malformed_approval")
+            self._last_gallery_approval = approval
 
-            # Safety gate: CONFIDENTED transition requires explicit gallery match.
+            # Safety gate: CONFIRMED transition requires explicit gallery match.
             # confidence is a quality signal only — it never authorizes redaction.
-            has_gallery_match = matches and len(matches) > 0
+            has_gallery_match = approval.approved is True
 
             if has_gallery_match:
                 new_state = TrackState.CONFIRMED
                 is_redacted = True
                 review_required = False
-                # Extract matched profile from the gallery result (if any)
-                if matches and len(matches) > 0:
-                    self._confirmed_profile_id = matches[0][0]  # profile_id from gallery match result
-                else:
-                    self._confirmed_profile_id = None
+                self._confirmed_profile_id = approval.profile_id
                 # Wire Phase 8: apply effect to detected faces on CANDIDATE→CONFIRMED transition
                 if detections.bboxes:
                     out_frame_accumulator = frame.copy()
@@ -493,15 +629,27 @@ class RedactionPipeline:
         )
 
     def save_track_state(self) -> Any:
-        """Serialize current track state for persistence."""
+        """Serialize v2 track state, including temporal and approval context."""
         return {
+            "schema_version": 2,
             "track_state": self._track_state.value,
             "frame_index": self._frame_index,
+            "lost_frame_index": self._lost_frame_index,
+            "confirmed_profile_id": self._confirmed_profile_id,
         }
 
     def load_track_state(self, snapshot: Any) -> None:
-        """Restore track state from serialized snapshot."""
-        if not isinstance(snapshot, dict) or set(snapshot) != {"track_state", "frame_index"}:
+        """Restore legacy v1 or complete v2 track state without fail-open recovery."""
+        if not isinstance(snapshot, dict):
+            raise ValueError("track state snapshot has an invalid schema")
+        legacy_keys = {"track_state", "frame_index"}
+        v2_keys = legacy_keys | {"schema_version", "lost_frame_index", "confirmed_profile_id"}
+        keys = set(snapshot)
+        if keys == legacy_keys:
+            version = 1
+        elif keys == v2_keys and snapshot.get("schema_version") == 2:
+            version = 2
+        else:
             raise ValueError("track state snapshot has an invalid schema")
         try:
             track_state = TrackState(snapshot["track_state"])
@@ -514,5 +662,19 @@ class RedactionPipeline:
             or frame_index < -1
         ):
             raise ValueError("track state snapshot has an invalid frame index")
+        if version == 1 and track_state in (TrackState.CONFIRMED, TrackState.LOST):
+            # Older snapshots cannot prove who was approved or when a loss began.
+            # Degrade to a candidate requiring an explicit gallery approval.
+            track_state = TrackState.CANDIDATE
+        lost_frame_index = snapshot.get("lost_frame_index") if version == 2 else None
+        if lost_frame_index is not None and (
+            isinstance(lost_frame_index, bool) or not isinstance(lost_frame_index, int) or lost_frame_index < 0
+        ):
+            raise ValueError("track state snapshot has an invalid lost frame index")
+        profile_id = snapshot.get("confirmed_profile_id") if version == 2 else None
+        if profile_id is not None and not isinstance(profile_id, str):
+            raise ValueError("track state snapshot has an invalid confirmed profile")
         self._track_state = track_state
         self._frame_index = frame_index
+        self._lost_frame_index = lost_frame_index
+        self._confirmed_profile_id = profile_id if track_state is TrackState.CONFIRMED else None

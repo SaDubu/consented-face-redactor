@@ -1,6 +1,8 @@
 # Biometric and media material
 reference_faces/
 private_data/
+local_data/
+local-assets/
 output/
 data/
 *.jpg
@@ -21,6 +23,7 @@ data/
 *.engine
 *.pt
 *.pth
+*.ckpt
 *.bin
 *.npy
 *.npz

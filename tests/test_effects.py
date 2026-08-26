@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import zlib
-from io import BytesIO
-
 import cv2
 import numpy as np
 import pytest
@@ -18,12 +15,11 @@ from consented_face_redactor.effects import MosaicEffect, StickerEffect
 # ------------------------------------------------------------------ #
 
 def _make_png(width: int = 4, height: int = 4, r: int = 255, g: int = 0, b: int = 0, a: int = 255) -> bytes:
-    """Return valid PNG bytes with uniform RGBA colour (using Pillow)."""
-    from PIL import Image
-    img = Image.new("RGBA", (width, height), (r, g, b, a))
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    """Return valid PNG bytes with uniform RGBA colour."""
+    image = np.full((height, width, 4), (r, g, b, a), dtype=np.uint8)
+    encoded, png = cv2.imencode(".png", image)
+    assert encoded
+    return png.tobytes()
 
 
 # ================================================================== #
@@ -277,13 +273,7 @@ class TestStickerEffect:
         We use a small 1×1 red-sticker (r=255,g=0,b=0,a=0 → fully transparent).
         Pixels under that ROI should still be green [0,255,0].
         """
-        # Create a sticker with one fully-transparent pixel using Pillow.
-        from PIL import Image
-
-        trans = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-        buf = BytesIO()
-        trans.save(buf, format="PNG")
-        transparent_png = buf.getvalue()
+        transparent_png = _make_png(1, 1, r=0, g=0, b=0, a=0)
 
         effect = StickerEffect(transparent_png, scale_factor=1.0, anchor="center", eye_rotation=True)
         # Place the transparent sticker at [32,32], a green pixel on frame.

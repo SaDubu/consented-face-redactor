@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -60,9 +60,14 @@ class FiveLandmarks:
 class MosaicConfig:
     """Configuration for the mosaic effect."""
 
-    block_side_px: int = 8  # mosaic block side length; derived from face size if 0
+    grid_cells: int = 12
+    padding_ratio: float = 0.18
+    block_side_px: int = 8  # legacy compatibility; force_block_size remains authoritative
     force_block_size: Optional[int] = None  # override auto-sizing logic
-    min_block_px: int = 4
+    min_block_px: int = 10
+    shape: str = "rectangle"
+    ellipse_horizontal_scale: float = 1.40
+    ellipse_vertical_scale: float = 1.50
 
 
 @dataclass(frozen=True)
@@ -72,4 +77,3 @@ class BlurConfig:
 
     sigma_px: float = 4.0
     min_radius_px: int = 3
-

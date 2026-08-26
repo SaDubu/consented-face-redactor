@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Unit tests for benchmark runner (synthetic/local-only data policy enforced)."""
 import json
-import textwrap
 import pytest
-from consented_face_redactor.benchmark.runner import run_benchmark, RunnerResult
+from consented_face_redactor.benchmark import generate_aggregate_report, run_benchmark
+from consented_face_redactor.benchmark.runner import RunnerResult
 
 
 class TestRunnerResult:
@@ -26,127 +26,76 @@ class TestRunnerResult:
 
     def test_frozen(self):
         rr = RunnerResult(category="C", scenario="Z", passed=True, duration_ms=1.0)
-        with pytest.raises(ValueError):
+        with pytest.raises(AttributeError):
             rr.scenario = "changed"
 
 
-class TestCategoryEConfig:
-    """Category E - Config validation via production run_benchmark API."""
+class TestBenchmarkCategories:
+    @pytest.mark.parametrize("category", list("ABCDE"))
+    def test_category_results_are_observed(self, category: str) -> None:
+        report = run_benchmark(category=category)
 
-    def test_run_category_e_returns_dict_with_results(self):
-        from consented_face_redactor.benchmark.runner import run_benchmark
-        result = run_benchmark(category="E")
-        assert isinstance(result, dict)
-        assert "results" in result
-        assert "passed_count" in result
-        assert "total_count" in result
-        for r in result["results"]:
-            assert "scenario" in r
-            assert "passed" in r
-            assert "duration_ms" in r
-            assert "error" in r or True  # error may be absent when None
+        assert report["total_count"] == len(report["results"])
+        assert all(result["duration_ms"] >= 0 for result in report["results"])
+        assert all("error" in result for result in report["results"])
 
+    def test_confidence_only_never_confirms_or_redacts(self) -> None:
+        result = run_benchmark(category="A")["results"]
+        confidence_only = next(row for row in result if row["scenario"].startswith("A1"))
 
-class TestIdentitySafetyCategory:
-    """Category A - Identity Safety Gate tests."""
+        assert confidence_only["passed"] is True
+        assert confidence_only["metrics"]["final_state"] == "candidate"
+        assert confidence_only["metrics"]["is_redacted"] is False
+        assert confidence_only["metrics"]["approval_reason"] == "gallery_unavailable"
 
-    def test_confidence_only_stays_candidate(self):
-        from consented_face_redactor.pipeline import RedactionPipeline, TrackState
-        from consented_face_redactor.benchmark.runner._run_category_a_identity_safety import (
-            _MockEmptyGallery,
-            _MockHighConfDet,
-        )
+    def test_effect_scenarios_preserve_every_pixel_outside_effect_roi(self) -> None:
+        result = run_benchmark(category="B")["results"]
+        effects = [row for row in result if row["scenario"].startswith(("B1", "B2"))]
 
-        cfg = self._create_config(t_confirm=0.65)
-        pipe = RedactionPipeline(cfg)
-        result = pipe.process_frame(
-            frame=synthetic.frame_from_bboxes([(20, 20, 40, 40)]),
-            detector=_MockHighConfDet()
-            gallery=_MockEmptyGallery(),
-        )
-        assert result.current.state == TrackState.CANDIDATE
-        assert not result.redaction_applied
+        assert all(row["metrics"]["roi_changed"] for row in effects)
+        assert all(row["metrics"]["outside_preserved"] for row in effects)
 
+    def test_gallery_failures_are_fail_closed_with_distinct_reasons(self) -> None:
+        rows = run_benchmark(category="A")["results"]
+        failures = {row["scenario"]: row for row in rows if row["scenario"].startswith(("A6", "A7", "A8", "A9"))}
 
-class TestRedactionAccuracyCategory:
-    """Category B - Redaction Accuracy tests."""
+        assert {row["metrics"]["approval_reason"] for row in failures.values()} == {
+            "embedding_error", "gallery_match_error", "malformed_approval", "stale_profile",
+        }
+        assert all(row["passed"] is True for row in failures.values())
 
-    def test_mosaic_covers_bbox(self):
-        from consented_face_redactor.pipeline import MosaicEffect, FaceBox
-        mosaic = MosaicEffect()
-        
-        frame = synthetic.create_synth_frame(640, 480)
-        bbox = (100, 100, 200, 200)
-        
-        result = pipeline.render_mosaic(frame, FaceBox(*bbox))
-        
-        # Mosaic should change pixel values within the face ROI
-        assert not numpy.array_equal(result[bbox], frame[bbox])
+    def test_performance_reports_measurement_and_environment_metadata(self) -> None:
+        row = run_benchmark(category="D")["results"][0]
 
-    def test_sticker_placement_center(self):
-        from consented_face_redactor.pipeline import StickerEffect
-        
-        sticker = synthetic.create_sticker_effect()
-        center_bbox = (300, 250, 400, 350)  # center of 640x480 frame
-        
-        result = pipeline.render_sticker(frame, center_bbox)
-        
-        assert result is not None
-        assert "face" in json.loads(result.metadata)
+        assert row["metrics"]["median_latency_ms"] > 0
+        assert row["metrics"]["p95_latency_ms"] > 0
+        assert row["metrics"]["gallery_recheck_count"] >= 1
+        assert row["metrics"]["opencv_version"]
 
 
-class TestTrackTransitions:
-    def test_unseen_candidated_on_detection(self):
-        from consented_face_redactor.pipeline import RedactionPipeline, TrackState
-        
-        pipe = new_Pipeline()
-        frame = synth.create_frame(100, 100, "black")
-        
-        # First detection should transition UNSEEN -> CANDIDATE
-        result = pipe.process_frame(frame, frame_idx=0)
-        assert pipeline.current_track_state == TrackState.CANDIDATE
+class TestFailureIsolation:
+    def test_sticker_encoding_failure_is_reported_and_b3_is_retained(self, monkeypatch) -> None:
+        import consented_face_redactor.benchmark.runner as runner
+
+        monkeypatch.setattr(runner.cv2, "imencode", lambda *_args: (False, None))
+        result = runner.run_benchmark(category="B")["results"]
+
+        b2 = next(row for row in result if row["scenario"].startswith("B2"))
+        b3 = next(row for row in result if row["scenario"].startswith("B3"))
+        assert b2["passed"] is False
+        assert b2["error"] is not None
+        assert b3["passed"] is True
 
 
 class TestAggregateReport:
-    def test_aggregate_generates_valid_json(self):
-        report = benchmark_runner.generate_aggregate_report()
-        
-        # Report should be a valid JSON string
-        parsed = json.loads(report)
-        assert "categories" in parsed
-        assert "overall_pass_rate_pct" in parsed
-        
-        # Pass rate should be between 0 and 100
-        assert 0 <= parsed["overall_pass_rate_pct"] <= 100
+    def test_aggregate_is_json_derived_from_all_categories(self) -> None:
+        parsed = json.loads(generate_aggregate_report())
 
-    def test_aggregate_includes_safety_score(self):
-        report = benchmark_runner.generate_aggregate_report()
-        parsed = json.loads(report)
-        
-        categories = {c["name"]: c for c in parsed["categories"]}
-        
-        # Safety category should exist
-        assert "identity_safety" in categories
-        assert "pass_rate_pct" in categories["identity_safety"]
-
-
-class TestBenchmarkRunner:
-    def test_run_benchmark_returns_dict(self):
-        report = benchmark_runner.run(category="A")
-        
-        assert isinstance(report, dict)
-        assert "results" in report
-        assert "passed_count" in report
-
-    def test_benchmark_completes_quickly(self, monkeypatch):
-        """Benchmark should complete within reasonable time."""
-        import time
-        
-        start = time.monotonic()
-        result = benchmark_runner.run(category="A")
-        elapsed = time.monotonic() - start
-        
-        # Should complete in under 30 seconds
-        assert elapsed < 30.0
-        assert result["passed_count"] > 0
-
+        assert {entry["name"] for entry in parsed["categories"]} == {
+            "category_A", "category_B", "category_C", "category_D", "category_E",
+        }
+        assert parsed["total_all"] == sum(entry["total_count"] for entry in parsed["categories"])
+        assert parsed["total_passed"] == sum(entry["passed_count"] for entry in parsed["categories"])
+        assert "environment" in parsed
+        assert parsed["generated_at_utc"]
+        assert all("results" in entry for entry in parsed["categories"])

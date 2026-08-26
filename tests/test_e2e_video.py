@@ -1,23 +1,20 @@
 """E2E tests for RedactionPipeline — verified against production exports."""
 
 from __future__ import annotations
-import tempfile
 import numpy as np
 import pytest
-from io import BytesIO
-from PIL import Image
+import cv2
 
 # ------- Production imports (real classes) -------
 from consented_face_redactor.pipeline import (
     RedactionPipeline,
     DetectionResult,
-    EmbeddingResult,
     MatchDecision,
     ProcessResult,
     TrackState,
 )
 from consented_face_redactor.config import Config
-from consented_face_redactor.domain.types import FaceBox
+from consented_face_redactor.gallery_approval import GalleryApproval
 
 
 # ======= Shared helpers ======= #
@@ -48,13 +45,6 @@ class _MockDetector:
             det.bbox = bb
             rows.append(det)
         return rows
-
-
-class _MockEmptyDetector:
-    """A stub detector that returns no faces on every frame."""
-
-    def detect(self, frame):
-        return []
 
 
 class _MockTwoShotDetector:
@@ -92,7 +82,7 @@ class TestConfigDefaults:
 
 class TestPipelineConstruction:
     def test_pipeline_initializes_with_config(self) -> None:
-        """RedactionPipeline accepts a Config; no default() method exists."""
+        """RedactionPipeline accepts the documented default Config."""
         pipeline = RedactionPipeline(Config.default())
         assert isinstance(pipeline, RedactionPipeline)
         assert pipeline.current_track_state == TrackState.UNSEEN
@@ -103,13 +93,9 @@ class TestDetectionConfidenceGate:
     def test_high_confidence_stays_candidate(self) -> None:
         """Even with confidence > t_confirm, transition is CANDIDATE only."""
         cfg = Config(t_confirm=0.65)
-        pipeline = RedactionPipeline(cfg)
         # Synthetic frame: 64x64 black, detection over ROI [20,20,40,40]
         frame = np.zeros((64, 64, 3), dtype=np.uint8)
-        det = DetectionResult(bboxes=[(20., 20., 40., 40.)], landmarks=[], confidences=[1.0])
-
-        # Inject mock detector so the pipeline actually sees a face
-        pipeline._detector = _MockDetector()
+        pipeline = RedactionPipeline(cfg, detector=_MockDetector())
         
         # Frame 0: UNSEEN → CANDIDATE
         result = pipeline.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
@@ -122,19 +108,20 @@ class TestDetectionConfidenceGate:
 class TestGalleryMatchConfirmsRedaction:
     def test_gallery_match_transitions_to_confirmed(self) -> None:
         """Explicit gallery match triggers CONFIRMED; confidence alone does not."""
-        # Create a fake gallery matcher (mocks the _gallery attribute).
+        # The gallery is an explicit constructor dependency.
         class FakeGallery:
             def embed(self, frame):
                 return np.zeros(512, dtype=np.float32)
 
             def match(self, vec):
-                return [("subject1", 0.95)]
+                return GalleryApproval(True, "subject1", 0.95, "explicit_approval", "test-v1")
         cfg = Config(effect_mode="mosaic", recheck_interval_frames=1, t_confirm=0.65)
-        pipeline = RedactionPipeline(cfg)
-        pipeline._gallery = FakeGallery()
-        # Inject mock detector so the pipeline sees faces AND uses gallery for CONFIRMED
-        pipeline._detector = _MockDetector(
-            bboxes=[(20.0, 20.0, 40.0, 40.0)], confidences=[0.8]
+        pipeline = RedactionPipeline(
+            cfg,
+            gallery=FakeGallery(),
+            detector=_MockDetector(
+                bboxes=[(20.0, 20.0, 40.0, 40.0)], confidences=[0.8]
+            ),
         )
 
         frame: np.ndarray = np.zeros((64, 64, 3), dtype=np.uint8)
@@ -144,42 +131,34 @@ class TestGalleryMatchConfirmsRedaction:
         assert pipeline.current_track_state == TrackState.CANDIDATE
         assert not r0.is_redacted
 
-        # Frame 5 ≥ recheck_interval_frames (1) since last candidate frame → match triggers CONFIRMED
-        det_with_face = DetectionResult(
-            bboxes=[(20., 20., 40., 40.)], landmarks=[], confidences=[1.0]
-        )
-        # Frame with detection and gallery embedding triggers CONFIRMED
+        # A subsequent face frame with an explicit gallery match confirms identity.
         result_confirmed = pipeline.process_frame(frame, frame_index=5, timestamp=2.5, state=None)
         assert pipeline.current_track_state == TrackState.CONFIRMED
+        assert result_confirmed.is_redacted is True
 # ======= Transition state transitions (detector only, no gallery) ======= #
 
 class TestTransitionStates:
     def test_unseen_becomes_candidate_on_detection(self) -> None:
         """First detection on UNSEEN → CANDIDATE."""
         cfg = Config()
-        pipeline = RedactionPipeline(cfg)
         frame = np.zeros((64, 64, 3), dtype=np.uint8)
+        pipeline = RedactionPipeline(cfg, detector=_MockDetector())
         assert pipeline.current_track_state == TrackState.UNSEEN
-        det = DetectionResult(bboxes=[(20., 20., 40., 40.)], landmarks=[], confidences=[1.0])
-        # Inject mock detector so the CANIDATE transition fires
-        pipeline._detector = _MockDetector()
         pipeline.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
         assert pipeline.current_track_state == TrackState.CANDIDATE
 
     def test_candidate_no_detection_briefly_stays_candidate_then_lost(self) -> None:
         """Face disappears briefly while CANDIDATE → LOST, not UNSEEN."""
         cfg = Config(t_confirm=0.65)
-        pipeline = RedactionPipeline(cfg)
         frame = np.zeros((64, 64, 3), dtype=np.uint8)
-        # First: detect face → CANDIDATE (two-shot detector returns face then empty on subsequent calls)
-        pipeline._detector = _MockTwoShotDetector(
+        pipeline = RedactionPipeline(cfg, detector=_MockTwoShotDetector(
             first_call_bboxes=[(20.0, 20.0, 40.0, 40.0)], first_call_confidences=[1.0]
-        )
-        r = pipeline.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
-        assert pipeline.current_track_state == TrackState.CANDIDATE
+        ))
+        first = pipeline.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
+        assert first.track_state == TrackState.CANDIDATE
         # No detection on next frame → LOST (not back to UNSEEN)
-        r = pipeline.process_frame(frame, frame_index=1, timestamp=0.5, state=None)
-        assert pipeline.current_track_state == TrackState.LOST
+        second = pipeline.process_frame(frame, frame_index=1, timestamp=0.5, state=None)
+        assert second.track_state == TrackState.LOST
 # ======= Pipeline renders correct overlay shapes ======= #
 
 class TestRenderOutput:
@@ -189,13 +168,7 @@ class TestRenderOutput:
         pipeline = RedactionPipeline(cfg)
         frame = np.zeros((64, 64, 3), dtype=np.uint8)
 
-        # First detection -> CANDIDATE (no gallery match, so no redaction)
-        det_with_face = DetectionResult(
-            bboxes=[(20., 20., 40., 40.)], landmarks=[], confidences=[1.0]
-        )
-        frame_with_face = np.zeros((64, 64, 3), dtype=np.uint8)
-
-        # Frame 0: UNSEEN → CANDIDATE (no detections since detector is None)
+        # No detector means no detection and no redaction.
         result = pipeline.process_frame(frame, frame_index=0, timestamp=0.0, state=None)
         assert isinstance(result, ProcessResult)
         assert result.result_frame.shape == (64, 64, 3)
@@ -210,17 +183,16 @@ class TestStickerInitWithBytes:
         """StickerEffect.__init__ must accept raw PNG bytes (no mode string)."""
         from consented_face_redactor.effects.sticker import StickerEffect
 
-        # Minimal 1×1 white PNG
-        img = Image.new("RGBA", (1, 1), (255, 255, 255, 255))
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
+        # Minimal 1×1 white RGBA PNG, generated without a filesystem asset.
+        encoded, png = cv2.imencode(".png", np.array([[[255, 255, 255, 255]]], dtype=np.uint8))
+        assert encoded
+        png_bytes = png.tobytes()
         effect = StickerEffect(png_bytes)
         assert effect._sticker is not None
         assert effect._scale_factor == pytest.approx(1.0)
 
 
-# ======= MatchDecision / EmbeddingResult contract ======= #
+# ======= MatchDecision contract ======= #
 
 class TestDataClasses:
     def test_match_decision_fields(self) -> None:

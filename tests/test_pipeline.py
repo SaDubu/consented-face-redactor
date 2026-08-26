@@ -35,14 +35,14 @@ class TestProcessFrame:
         np.testing.assert_array_equal(frame, original)
         assert result.result_frame is not frame
 
-    def test_confirmed_track_without_face_transitions_to_lost(self):
+    def test_legacy_confirmed_track_is_reconfirmed_before_loss(self):
         pipeline = _pipeline()
         pipeline.load_track_state({"track_state": "confirmed", "frame_index": 3})
 
         result = pipeline.process_frame(_frame(), 4, 0.2, state=None)
 
         assert result.track_state is TrackState.LOST
-        assert result.review_required is True
+        assert result.review_required is False
         assert pipeline.current_track_state is TrackState.LOST
 
     def test_frame_index_reversal_expires_track(self):
@@ -84,7 +84,13 @@ class TestTrackStatePersistence:
 
         snapshot = pipeline.save_track_state()
 
-        assert snapshot == {"track_state": "candidate", "frame_index": 42}
+        assert snapshot == {
+            "schema_version": 2,
+            "track_state": "candidate",
+            "frame_index": 42,
+            "lost_frame_index": None,
+            "confirmed_profile_id": None,
+        }
         assert pipeline.current_track_state is TrackState.CANDIDATE
 
     @pytest.mark.parametrize(
@@ -104,9 +110,31 @@ class TestTrackStatePersistence:
         with pytest.raises(ValueError):
             pipeline.load_track_state(snapshot)
         assert pipeline.save_track_state() == {
+            "schema_version": 2,
             "track_state": "candidate",
             "frame_index": 7,
+            "lost_frame_index": None,
+            "confirmed_profile_id": None,
         }
+
+    def test_legacy_confirmed_snapshot_requires_reconfirmation(self):
+        pipeline = _pipeline()
+        pipeline.load_track_state({"track_state": "confirmed", "frame_index": 7})
+
+        assert pipeline.current_track_state is TrackState.CANDIDATE
+
+    def test_v2_snapshot_preserves_loss_timing_and_profile(self):
+        pipeline = _pipeline()
+        snapshot = {
+            "schema_version": 2,
+            "track_state": "lost",
+            "frame_index": 12,
+            "lost_frame_index": 10,
+            "confirmed_profile_id": None,
+        }
+        pipeline.load_track_state(snapshot)
+
+        assert pipeline.save_track_state() == snapshot
 
 
 def test_stub_output_is_deterministic():

@@ -94,16 +94,17 @@ class TestGalleryMatcherEmbed:
         profile_db = {"alice": [0.1, 0.2], "bob": [0.15, 0.25]}
         gallery = GalleryMatcher(gallery_db=profile_db)
         result = gallery.match(None)
-        assert result is None
+        assert result.approved is False
+        assert result.reason_code == "embedding_unavailable"
 
     def test_empty_gallery_produces_no_matches(self):
         frame = _make_frame()
         fake_data: list[float] = [0.1, 0.2]
         matcher = GalleryMatcher()
 
-        # We cannot inject an embedding without a real backend, so we only
-        # verify the stub behaviour: match(None) → None.
-        assert matcher.match(fake_data) == []
+        result = matcher.match(fake_data)
+        assert result.approved is False
+        assert result.reason_code == "empty_gallery"
 
 
 class TestGalleryMatcherMatch:
@@ -112,7 +113,9 @@ class TestGalleryMatcherMatch:
     def test_matches_return_empty_list(self):
         matcher = GalleryMatcher()
         fake_embedding: list[float] = [0.1, 0.2]
-        assert matcher.match(fake_embedding) == []
+        result = matcher.match(fake_embedding)
+        assert result.approved is False
+        assert result.reason_code == "empty_gallery"
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +148,7 @@ class TestNoFaceDetection:
     def test_no_face_while_confirmed_transitions_to_lost(self):
         config = _make_config()
         pipeline = RedactionPipeline(config)
-        # Simulate CONFIRMED via load_track_state
+        # A v1 CONFIRMED snapshot requires fresh approval after restoration.
         pipeline.load_track_state({
             "track_state": "confirmed",
             "frame_index": 5,
@@ -154,7 +157,7 @@ class TestNoFaceDetection:
             _make_frame(), frame_index=6, timestamp=1.0, state=None,
         )
         assert result.track_state is TrackState.LOST
-        assert result.review_required is True
+        assert result.review_required is False
 
     def test_no_face_while_candidate_transitions_to_lost(self):
         """Test CANDIDATE → LOST on no face."""
@@ -192,8 +195,8 @@ class TestNoFaceDetection:
         assert result2.track_state is TrackState.UNSEEN
 
 
-class TestCandidateToConfirmed:
-    """CANDIDATE → CONFIRMED when confidence >= t_confirm."""
+class TestConfidenceDoesNotConfirmIdentity:
+    """Detector confidence alone cannot authorize a confirmed identity."""
 
     def test_confirmed_above_threshold(self):
         config = _make_config(t_confirm=0.65)
@@ -202,9 +205,9 @@ class TestCandidateToConfirmed:
             _make_frame(), frame_index=0, timestamp=0.0, state=None,
         )
 
-        assert result1.track_state is TrackState.CONFIRMED
-        assert result1.is_redacted is True
-        assert result1.review_required is False
+        assert result1.track_state is TrackState.CANDIDATE
+        assert result1.is_redacted is False
+        assert result1.review_required is True
 
 
 class TestLostAndexpired:
@@ -244,4 +247,3 @@ class TestLostExpireReappearance:
                 _make_frame(), frame_index=i + 1, timestamp=float(i + 1), state=None,
             )
             assert result.track_state is TrackState.EXPIRED
-

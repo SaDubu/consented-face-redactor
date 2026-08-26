@@ -1,0 +1,14 @@
+{
+  "schema_version": 4,
+  "effect_mode": "mosaic",
+  "t_confirm": 0.65,
+  "t_keep": 0.55,
+  "track_lost_ttl_frames": 10,
+  "recheck_interval_frames": 30,
+  "mosaic_grid_cells": 12,
+  "mosaic_padding_ratio": 0.18,
+  "mosaic_min_block_px": 10,
+  "mosaic_shape": "ellipse",
+  "mosaic_ellipse_horizontal_scale": 1.4,
+  "mosaic_ellipse_vertical_scale": 1.5
+}

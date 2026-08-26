@@ -29,35 +29,43 @@ class TestInspectConfig:
 
         assert result == 0
         assert "Config schema inspection" in captured.out
-        assert "UncertainPolicy: ['privacy_safe', 'precision']" in captured.out
+        assert "effect_mode: 'mosaic'" in captured.out
+        assert "CONFIRMED redaction requires an explicit gallery match." in captured.out
         captured.out.encode("cp949")
         captured.err.encode("cp949")
 
-    def test_loads_json_and_redacts_local_paths(self, tmp_path, capsys):
-        private_path = tmp_path / "private-input.mp4"
+    def test_loads_recognized_json_configuration(self, tmp_path, capsys):
         config_path = tmp_path / "config.json"
         config_path.write_text(
-            json.dumps({"input_path": str(private_path)}), encoding="utf-8"
+            json.dumps({"effect_mode": "sticker"}), encoding="utf-8"
         )
 
         result = main(["inspect-config", "--file", str(config_path)])
         captured = capsys.readouterr()
 
         assert result == 0
-        assert "input_path: '<configured>'" in captured.out
-        assert str(private_path) not in captured.out
+        assert "effect_mode: 'sticker'" in captured.out
 
-    def test_invalid_config_does_not_echo_token(self, tmp_path, capsys):
+    def test_unknown_config_key_is_ignored(self, tmp_path, capsys):
         secret = "A" * 48
         path = tmp_path / "config.json"
-        path.write_text(json.dumps({"effect_mode": secret}), encoding="utf-8")
+        path.write_text(json.dumps({"unused_key": secret}), encoding="utf-8")
 
         result = main(["inspect-config", "--file", str(path)])
         captured = capsys.readouterr()
 
+        assert result == 0
+        assert secret not in captured.out
+        assert captured.err == ""
+
+    def test_strict_config_rejects_unknown_key(self, tmp_path, capsys):
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({"unused_key": "rejected"}), encoding="utf-8")
+
+        result = main(["inspect-config", "--strict-config", "--file", str(path)])
+
         assert result == 2
-        assert secret not in captured.err
-        assert path.name in captured.err
+        assert "Unknown config keys" in capsys.readouterr().err
 
 
 class TestValidateModels:

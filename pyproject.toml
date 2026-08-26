@@ -7,7 +7,7 @@ name = "consented-face-redactor"
 version = "0.1.0"
 description = "Consented face redaction tool with mosaic and sticker rendering"
 requires-python = ">=3.12"
-license = {text = "UNLICENSED"}
+license = {file = "LICENSE"}
 dependencies = [
     "numpy>=1.26,<3",
 ]
@@ -20,6 +20,11 @@ dev = [
 inference = [
     "onnxruntime>=1.16",
     "opencv-python-headless>=4.8,<6",
+]
+tracking = [
+    "torch>=2.7,<3",
+    "torchvision>=0.22,<1",
+    "einops>=0.8,<1",
 ]
 
 [project.scripts]

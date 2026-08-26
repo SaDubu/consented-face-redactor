@@ -172,9 +172,9 @@ def test_gallery_enroll_no_subparser_args():
 
 
 @patch("consented_face_redactor.media.frame_source.OpenCvFrameSource")
-def test_gallery_enroll_basic_flow(mock_src_cls):
-    """Verify gallery-enroll reads image and returns 0."""
-    tmp_dir = Path(tempfile.gettempdir())
+def test_gallery_enroll_basic_flow(mock_src_cls, tmp_path):
+    """Enrollment requires a real detector/embedder path and explicit approval."""
+    tmp_dir = tmp_path
     input_img = tmp_dir / "test_enroll.png"
     input_img.write_bytes(_make_png_with_mean())
 
@@ -183,14 +183,31 @@ def test_gallery_enroll_basic_flow(mock_src_cls):
     src_inst.read.return_value = (True, np.full((240, 320, 3), 255, dtype=np.uint8))
     mock_src_cls.return_value = src_inst
 
+    from consented_face_redactor.adapters.detection_iface import BoundingBox, FaceDetection
     from consented_face_redactor.cli import main
     from consented_face_redactor.gallery import LocalGallery
 
     gallery_db_path = tmp_dir / "test_gallery.json"
+    approval_db_path = tmp_dir / "approvals.json"
+    detector_entry = {"filename": "yunet.onnx", "model_id": "yunet"}
+    embedder_entry = {"filename": "sface.onnx", "model_id": "sface", "preprocessing_revision": 1}
+    detection = FaceDetection(
+        BoundingBox(1, 1, 20, 20), np.zeros((5, 2), dtype=np.float32), 0.99
+    )
 
-    with patch.object(LocalGallery, 'enroll', return_value="profile123"), \
-         patch.object(LocalGallery, 'save_to_json_file', return_value=None):
-        result = main(["gallery-enroll", "--input", str(input_img), "--gallery-db", str(gallery_db_path)])
+    with patch("consented_face_redactor.cli._load_verified_model_entries", return_value=(detector_entry, embedder_entry)), \
+         patch("consented_face_redactor.adapters.opencv.OpenCvYuNetDetector") as detector_cls, \
+         patch("consented_face_redactor.adapters.opencv.OpenCvSFaceEmbedder") as embedder_cls, \
+         patch.object(LocalGallery, 'enroll', return_value="prof-00000000"), \
+         patch.object(LocalGallery, 'save', return_value=None), \
+         patch("consented_face_redactor.approval_store.ApprovalStore.save", return_value=None):
+        detector_cls.return_value.detect.return_value = [detection]
+        embedder_cls.return_value.embed.return_value = (np.array([1.0, 0.0], dtype=np.float32), 1)
+        result = main([
+            "gallery-enroll", "--input", str(input_img), "--gallery-db", str(gallery_db_path),
+            "--approval-db", str(approval_db_path), "--model-dir", str(tmp_dir),
+            "--manifest-dir", str(tmp_dir), "--approve", "--approval-reason", "test_consent",
+        ])
 
     assert result == 0
 
