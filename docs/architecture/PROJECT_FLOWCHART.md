@@ -7,7 +7,7 @@
 ```mermaid
 flowchart TD
     subgraph ENROLL[1. 대상자 등록]
-        A[대상자만 등장하는 동의 영상] --> B[일정 간격으로 frame 추출]
+        A[대상자만 등장하는 영상] --> B[일정 간격으로 frame 추출]
         B --> C[YuNet 얼굴 검출]
         C --> D{유효한 얼굴이 정확히 하나인가?}
         D -- 아니오 --> E[등록 제외 및 review 사유 기록]
