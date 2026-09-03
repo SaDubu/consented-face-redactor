@@ -15,9 +15,3 @@ GitHub 첫 화면의 설치·실행 절차는 루트 [README.md](../README.md)�
 
 - [SYSTEM_ARCHITECTURE_GUIDE.md](architecture/SYSTEM_ARCHITECTURE_GUIDE.md): 구성요소, 데이터 계약, 알고리즘과 기술 스택
 - [PROJECT_FLOWCHART.md](architecture/PROJECT_FLOWCHART.md): 등록·승인·추적·렌더링과 보안 경계 시각화
-
-## 포트폴리오
-
-- [PROJECT_PORTFOLIO_CASE_STUDY.md](portfolio/PROJECT_PORTFOLIO_CASE_STUDY.md): 문제 발견, 오류, 원인 분석, 설계 선택, 함수 책임, 검증과 한계를 설명한 상세 사례 연구
-
-포트폴리오는 프로젝트 실행 설명과 분리된 독립 문서입니다. GitHub 방문자는 루트 README에서 빠르게 실행 방법을 확인하고, 기술적 의사결정이 필요한 경우에만 포트폴리오 문서로 이동할 수 있습니다.
