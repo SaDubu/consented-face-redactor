@@ -66,7 +66,7 @@ flowchart LR
 
 가장 중요한 구분은 `유사하다`와 `승인됐다`가 같지 않다는 점이다. similarity는 gallery 판단에 사용되는 관측값이고, pipeline이 소비하는 최종 권한은 구조화된 `GalleryApproval.approved=True`뿐이다.
 
-## 3. 신원 권한이 전달되는 방식
+## 3. 사람 구별 결과가 전달되는 방식
 
 ```mermaid
 flowchart TD
