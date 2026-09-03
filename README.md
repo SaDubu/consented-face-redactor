@@ -285,17 +285,11 @@ consented-face-redactor/
 - [실제 영상 테스트 가이드](docs/REAL_VIDEO_TEST_GUIDE.md)
 - [설정 schema](docs/CONFIG_SCHEMA.md)
 - [함수별 코드베이스 설명](docs/CODEBASE_FUNCTION_REFERENCE.md)
-- [보안·데이터 정책](docs/SECURITY_AND_DATA_POLICY.md)
-- [benchmark protocol](docs/PHASE10_BENCHMARK_PROTOCOL.md)
 
 ### 설계와 검증
 
 - [전체 시스템 아키텍처 가이드](docs/architecture/SYSTEM_ARCHITECTURE_GUIDE.md)
 - [전체 처리 및 권한 흐름도](docs/architecture/PROJECT_FLOWCHART.md)
-- [등록 영상 구현 명세](docs/VIDEO_REFERENCE_ENROLLMENT_IMPLEMENTATION_SPEC.md)
-- [TAPNext++ 작업지시서](docs/TEMPORAL_TRACKING_AND_STRONG_MOSAIC_WORK_ORDER.md)
-- [TAPNext++ 구현 및 실제 영상 검증 보고서](docs/TEMPORAL_TRACKING_IMPLEMENTATION_REPORT.md)
-- [로컬 실제 모델 구현 보고서](docs/LOCAL_REAL_MODEL_IMPLEMENTATION_REPORT.md)
 
 ### 포트폴리오
 
