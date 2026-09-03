@@ -2,7 +2,7 @@
 
 동의받은 특정 인물의 얼굴을 등록 영상에서 로컬 gallery로 구성하고, 별도의 FHD 영상에서 그 인물의 얼굴에만 모자이크를 적용하는 Python Vision AI 프로젝트입니다.
 
-OpenCV YuNet으로 얼굴을 찾고, SFace와 명시적 gallery approval로 대상자를 확인합니다. 선택적 TAPNext++ 경로는 승인된 얼굴 위치만 시간축으로 연결합니다. tracker confidence나 detector confidence만으로는 신원을 승인하지 않습니다.
+OpenCV YuNet으로 얼굴을 찾고, SFace와 명시적 gallery approval로 대상자를 확인합니다. 선택적 TAPNext++ 경로는 승인된 얼굴 위치만 시간축으로 연결합니다. tracker confidence나 detector confidence만으로는 사람을 구별하지 않습니다.
 
 > 현재 상태: 제공된 1080×1920·30fps·456 frame 테스트 영상에서 clean enrollment와 TAPNext++ 양방향 합의를 사용해 456/456 frame을 처리했습니다. 이 결과는 해당 로컬 영상의 관측값이며 임의 영상에 대한 절대 정확도 보장은 아닙니다.
 
@@ -53,7 +53,7 @@ python -c "import json; from consented_face_redactor.benchmark import generate_a
 ```text
 local-assets/
   input/
-    learn.mp4                       # 동의한 대상자만 등장하는 등록 영상
+    learn.mp4                       # 목표로 하는 대상자만 등장하는 등록 영상
     test.mp4                        # 처리할 영상
   models/
     face_detection_yunet_2023mar.onnx
@@ -228,7 +228,7 @@ flowchart TD
     M -. tracker만으로 승인 불가 .-> Q
 ```
 
-이 흐름에서 신원 권한을 만드는 유일한 지점은 `GalleryApproval.approved=True`입니다. YuNet은 위치 후보, SFace similarity는 gallery 관측, TAPNext++는 승인된 위치의 시간적 연속성, mosaic renderer는 최종 표현만 담당합니다.
+이 흐름에서 사람의 구분점을 만드는 유일한 지점은 `GalleryApproval.approved=True`입니다. YuNet은 위치 후보, SFace similarity는 gallery 관측, TAPNext++는 승인된 위치의 시간적 연속성, mosaic renderer는 최종 표현만 담당합니다.
 
 ### 신원 승인 경계
 
