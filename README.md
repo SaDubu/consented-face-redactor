@@ -202,7 +202,7 @@ FFmpeg remux가 성공한 뒤에만 최종 destination을 생성합니다. 현�
 
 ```mermaid
 flowchart TD
-    A[동의된 대상자 등록 영상] --> B[YuNet 얼굴 검출]
+    A[목표로 하는 대상자 등록 영상] --> B[YuNet 얼굴 검출]
     B --> C{유효한 단일 얼굴인가?}
     C -- 아니오 --> D[자동 등록 제외 및 review 기록]
     C -- 예 --> E[SFace embedding 생성]
@@ -214,7 +214,7 @@ flowchart TD
     J --> K[SFace gallery 평가]
     H --> K
     K --> L{GalleryApproval.approved가 True인가?}
-    L -- 아니오 --> M[신원 권한 없음]
+    L -- 아니오 --> M[목표로 하는 사람 없음]
     L -- 예 --> N[Identity anchor 생성]
     N --> O[TAPNext++ 정방향·역방향 위치 추적]
     O --> P{두 경로·bbox·detection이 합의하는가?}
